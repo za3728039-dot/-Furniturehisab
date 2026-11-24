@@ -25,10 +25,48 @@ jobs:
             [ -f "$z" ] && unzip -o "$z" -d extracted
           done
 
+      - name: Apply Green & White Premium Theme and Icon
+        run: |
+          PROJECT_DIR=$(dirname "$(find . -maxdepth 5 \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) | head -n 1)")
+          APP_DIR="$PROJECT_DIR/app"
+          mkdir -p "$APP_DIR/src/main/res/drawable" "$APP_DIR/src/main/res/mipmap-anydpi-v26"
+          cat << 'EOF' > "$APP_DIR/src/main/res/drawable/ic_launcher_bg.xml"
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+            <gradient android:startColor="#146C43" android:endColor="#0A3622" android:angle="270"/>
+          </shape>
+          EOF
+          cat << 'EOF' > "$APP_DIR/src/main/res/drawable/ic_launcher_fg.xml"
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+            <path android:fillColor="#FFFFFF" android:pathData="M54,22 L24,45 L29,45 L29,48 L54,29 L79,48 L79,45 L84,45 Z"/>
+            <path android:fillColor="#FFFFFF" android:pathData="M50,35 h8 v8 h-8 z"/>
+            <path android:fillColor="#FFFFFF" android:pathData="M31,55 c0,-3 2,-5 5,-5 h36 c3,0 5,2 5,5 v8 h-46 z"/>
+            <path android:fillColor="#FFFFFF" android:pathData="M27,63 h54 c2,0 4,2 4,4 v10 c0,2 -2,4 -4,4 h-4 v4 h-6 v-4 h-34 v4 h-6 v-4 h-4 c-2,0 -4,-2 -4,-4 v-10 c0,-2 2,-4 4,-4 z"/>
+            <path android:fillColor="#FFD43B" android:pathData="M26,84 Q54,79 82,85 Q54,83 26,84 Z"/>
+          </vector>
+          EOF
+          cat << 'EOF' > "$APP_DIR/src/main/res/mipmap-anydpi-v26/ic_launcher.xml"
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+            <background android:drawable="@drawable/ic_launcher_bg"/>
+            <foreground android:drawable="@drawable/ic_launcher_fg"/>
+          </adaptive-icon>
+          EOF
+          cp "$APP_DIR/src/main/res/mipmap-anydpi-v26/ic_launcher.xml" "$APP_DIR/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml"
+          MAIN_KT=$(find "$APP_DIR/src/main" -name "MainActivity.kt" | head -n 1)
+          python3 - "$MAIN_KT" << 'PYEOF'
+          import sys
+          p = sys.argv[1]
+          code = open(p, encoding='utf-8').read()
+          code = code.replace('0xFFF7F7F7.toInt()', '0xFFF1F6F3.toInt()')
+          code = code.replace('0xFFE4F3E8.toInt()', '0xFFFFFFFF.toInt()')
+          code = code.replace('0xFF145A32.toInt()', '0xFF0F5132.toInt()')
+          if 'Button(this)' in code and 'setBackgroundColor(0xFF0F5132.toInt())' not in code:
+              code = code.replace('Button(this).apply {', 'Button(this).apply { setBackgroundColor(0xFF0F5132.toInt()); setTextColor(0xFFFFFFFF.toInt()); ')
+          open(p, 'w', encoding='utf-8').write(code)
+          PYEOF
+
       - name: Build Debug APK
         run: |
           PROJECT_DIR=$(dirname "$(find . -maxdepth 5 \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) | head -n 1)")
-          echo "Building in: $PROJECT_DIR"
           printf 'allprojects {\n  tasks.configureEach { t ->\n    if (t.hasProperty("kotlinOptions")) { t.kotlinOptions.jvmTarget = "1.8" }\n  }\n}\n' > /tmp/fix-jvm.gradle
           cd "$PROJECT_DIR"
           if [ -f "./gradlew" ]; then
