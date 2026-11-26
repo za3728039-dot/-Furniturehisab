@@ -25,14 +25,14 @@ jobs:
             [ -f "$z" ] && unzip -o "$z" -d extracted
           done
 
-      - name: Apply Green & White Premium Theme and Icon
+      - name: Upgrade App to Same-to-Same 6-Screen Green & White UI
         run: |
           PROJECT_DIR=$(dirname "$(find . -maxdepth 5 \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) | head -n 1)")
           APP_DIR="$PROJECT_DIR/app"
           mkdir -p "$APP_DIR/src/main/res/drawable" "$APP_DIR/src/main/res/mipmap-anydpi-v26"
           cat << 'EOF' > "$APP_DIR/src/main/res/drawable/ic_launcher_bg.xml"
           <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-            <gradient android:startColor="#146C43" android:endColor="#0A3622" android:angle="270"/>
+            <gradient android:startColor="#146C43" android:endColor="#07301C" android:angle="270"/>
           </shape>
           EOF
           cat << 'EOF' > "$APP_DIR/src/main/res/drawable/ic_launcher_fg.xml"
@@ -52,17 +52,463 @@ jobs:
           EOF
           cp "$APP_DIR/src/main/res/mipmap-anydpi-v26/ic_launcher.xml" "$APP_DIR/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml"
           MAIN_KT=$(find "$APP_DIR/src/main" -name "MainActivity.kt" | head -n 1)
-          python3 - "$MAIN_KT" << 'PYEOF'
-          import sys
-          p = sys.argv[1]
-          code = open(p, encoding='utf-8').read()
-          code = code.replace('0xFFF7F7F7.toInt()', '0xFFF1F6F3.toInt()')
-          code = code.replace('0xFFE4F3E8.toInt()', '0xFFFFFFFF.toInt()')
-          code = code.replace('0xFF145A32.toInt()', '0xFF0F5132.toInt()')
-          if 'Button(this)' in code and 'setBackgroundColor(0xFF0F5132.toInt())' not in code:
-              code = code.replace('Button(this).apply {', 'Button(this).apply { setBackgroundColor(0xFF0F5132.toInt()); setTextColor(0xFFFFFFFF.toInt()); ')
-          open(p, 'w', encoding='utf-8').write(code)
-          PYEOF
+          cat << 'KTEOF' > "$MAIN_KT"
+          package com.example.furniturehisab
+
+          import android.app.AlertDialog
+          import android.content.ContentValues
+          import android.content.Context
+          import android.content.Intent
+          import android.database.sqlite.SQLiteDatabase
+          import android.database.sqlite.SQLiteOpenHelper
+          import android.graphics.BitmapFactory
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.text.Editable
+          import android.text.InputType
+          import android.text.TextWatcher
+          import android.util.Base64
+          import android.view.Gravity
+          import android.view.View
+          import android.widget.*
+          import androidx.activity.ComponentActivity
+          import androidx.activity.result.contract.ActivityResultContracts
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.io.File
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          data class Furniture(
+              val id: Long, val model: String, val size: String, val amount: Double,
+              val dateTime: String, val photo: String
+          )
+
+          class Db(context: Context) : SQLiteOpenHelper(context, "furniture.db", null, 1) {
+              override fun onCreate(db: SQLiteDatabase) {
+                  db.execSQL("CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT, model TEXT, size TEXT, amount REAL, dateTime TEXT, photo TEXT)")
+              }
+              override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+              fun all(): List<Furniture> {
+                  val out = mutableListOf<Furniture>()
+                  readableDatabase.rawQuery("SELECT * FROM items ORDER BY id DESC", null).use { c ->
+                      while (c.moveToNext()) out.add(Furniture(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "",
+                          c.getDouble(3), c.getString(4) ?: "", c.getString(5) ?: ""))
+                  }
+                  return out
+              }
+              fun save(id: Long?, model: String, size: String, amount: Double, date: String, photo: String) {
+                  val v = ContentValues().apply {
+                      put("model", model); put("size", size); put("amount", amount); put("dateTime", date); put("photo", photo)
+                  }
+                  if (id == null) writableDatabase.insert("items", null, v)
+                  else writableDatabase.update("items", v, "id=?", arrayOf(id.toString()))
+              }
+              fun delete(id: Long) { writableDatabase.delete("items", "id=?", arrayOf(id.toString())) }
+              fun clear() { writableDatabase.delete("items", null, null) }
+          }
+
+          class MainActivity : ComponentActivity() {
+              private lateinit var db: Db
+              private lateinit var root: FrameLayout
+              private var chosenPhoto = ""
+              private var previewImg: ImageView? = null
+              private var photoStatus: TextView? = null
+              private var searchText = ""
+
+              private val greenDark = 0xFF0B4628.toInt()
+              private val greenBtn = 0xFF0D6832.toInt()
+              private val greenLight = 0xFFE6F4EC.toInt()
+              private val goldColor = 0xFFFFD43B.toInt()
+              private val bgColor = 0xFFF2F6F4.toInt()
+              private val textDark = 0xFF14201A.toInt()
+              private val textMuted = 0xFF5F6F67.toInt()
+
+              private val pickPhoto = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+                  if (uri != null) {
+                      val dest = File(filesDir, "photo_${System.currentTimeMillis()}.jpg")
+                      contentResolver.openInputStream(uri)?.use { input -> dest.outputStream().use { input.copyTo(it) } }
+                      chosenPhoto = dest.absolutePath
+                      BitmapFactory.decodeFile(chosenPhoto)?.let { previewImg?.setImageBitmap(it) }
+                      photoStatus?.text = "📷 Change Photo ✓"
+                  }
+              }
+              private val exportBackup = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+                  if (uri != null) try { contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(makeBackup().toString(2)) }; toast("Backup Saved ✓") } catch (e: Exception) { toast("Backup failed") }
+              }
+              private val importBackup = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+                  if (uri != null) try {
+                      val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
+                      restoreBackup(JSONObject(text)); showHome(); toast("Backup Restored ✓")
+                  } catch (e: Exception) { toast("Invalid backup file") }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.statusBarColor = greenDark
+                  db = Db(this)
+                  root = FrameLayout(this).apply { setBackgroundColor(bgColor) }
+                  setContentView(root)
+                  showSplash()
+              }
+
+              private fun showSplash() {
+                  root.removeAllViews()
+                  val splash = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+                      background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0xFF146C43.toInt(), 0xFF062C1A.toInt()))
+                      setPadding(dp(24), dp(24), dp(24), dp(24))
+                  }
+                  splash.addView(TextView(this).apply { text = "🏠"; textSize = 72f; gravity = Gravity.CENTER })
+                  splash.addView(TextView(this).apply {
+                      text = "Furniture"; textSize = 36f; setTypeface(null, Typeface.BOLD)
+                      setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER
+                  })
+                  splash.addView(TextView(this).apply {
+                      text = "Hisab"; textSize = 36f; setTypeface(null, Typeface.BOLD)
+                      setTextColor(goldColor); gravity = Gravity.CENTER
+                  }, lp(-1, -2, dp(12)))
+                  splash.addView(TextView(this).apply {
+                      text = "Hisab Rakho,\nTension Chhodo..."; textSize = 18f; setTypeface(null, Typeface.ITALIC)
+                      setTextColor(0xFFE8F5E9.toInt()); gravity = Gravity.CENTER
+                  }, lp(-1, -2, dp(28)))
+                  splash.addView(ProgressBar(this).apply { isIndeterminate = true })
+                  splash.addView(TextView(this).apply {
+                      text = "Loading..."; textSize = 13f; setTextColor(0xFFC8E6C9.toInt()); gravity = Gravity.CENTER
+                      setPadding(0, dp(8), 0, 0)
+                  })
+                  root.addView(splash)
+                  Handler(Looper.getMainLooper()).postDelayed({ showHome() }, 1200)
+              }
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private fun roundBg(color: Int, r: Int, stroke: Int = 0) = GradientDrawable().apply {
+                  setColor(color); cornerRadius = dp(r).toFloat()
+                  if (stroke != 0) setStroke(dp(1), stroke)
+              }
+
+              private fun topBar(title: String, leftText: String, onLeft: () -> Unit, rightText: String = "", onRight: (() -> Unit)? = null): LinearLayout {
+                  return LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                      setBackgroundColor(greenDark); setPadding(dp(14), dp(14), dp(14), dp(14))
+                      addView(TextView(context).apply {
+                          text = leftText; textSize = 22f; setTextColor(0xFFFFFFFF.toInt())
+                          setPadding(dp(8), dp(4), dp(12), dp(4)); setOnClickListener { onLeft() }
+                      })
+                      addView(TextView(context).apply {
+                          text = title; textSize = 20f; setTypeface(null, Typeface.BOLD)
+                          setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER
+                      }, LinearLayout.LayoutParams(0, -2, 1f))
+                      if (rightText.isNotEmpty() && onRight != null) {
+                          addView(TextView(context).apply {
+                              text = rightText; textSize = 20f; setTextColor(0xFFFFFFFF.toInt())
+                              setPadding(dp(12), dp(4), dp(8), dp(4)); setOnClickListener { onRight() }
+                          })
+                      } else {
+                          addView(View(context), LinearLayout.LayoutParams(dp(36), dp(1)))
+                      }
+                  }
+              }
+
+              private fun showHome() {
+                  root.removeAllViews()
+                  val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
+                  page.addView(topBar("Furniture Hisab", "☰", { showSettings() }, "☁", { showBackup() }))
+
+                  val scroll = ScrollView(this)
+                  val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(16), dp(16), dp(24)) }
+                  val records = db.all()
+                  val total = records.sumOf { it.amount }
+
+                  val summaryCard = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                      background = roundBg(0xFFFFFFFF.toInt(), 18, 0xFFDCE7E1.toInt())
+                      elevation = dp(4).toFloat(); setPadding(dp(18), dp(18), dp(18), dp(18))
+                  }
+                  val sumLeft = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  sumLeft.addView(TextView(this).apply { text = "Total Amount"; textSize = 15f; setTextColor(textMuted) })
+                  sumLeft.addView(TextView(this).apply {
+                      text = "₹ ${money(total)}"; textSize = 28f; setTypeface(null, Typeface.BOLD); setTextColor(textDark)
+                      setPadding(0, dp(4), 0, dp(6))
+                  })
+                  sumLeft.addView(TextView(this).apply {
+                      text = "📊 Total Records: ${records.size}"; textSize = 14f; setTypeface(null, Typeface.BOLD); setTextColor(greenDark)
+                  })
+                  summaryCard.addView(sumLeft, LinearLayout.LayoutParams(0, -2, 1f))
+                  summaryCard.addView(TextView(this).apply {
+                      text = "📈"; textSize = 40f; gravity = Gravity.CENTER
+                      background = roundBg(greenLight, 14); setPadding(dp(14), dp(10), dp(14), dp(10))
+                  })
+                  body.addView(summaryCard, lp(-1, -2, dp(14)))
+
+                  val addBtn = TextView(this).apply {
+                      text = "+  Add New Furniture"; textSize = 17f; setTypeface(null, Typeface.BOLD)
+                      setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER
+                      background = roundBg(greenBtn, 26); elevation = dp(3).toFloat()
+                      setPadding(dp(16), dp(14), dp(16), dp(14))
+                      setOnClickListener { showForm(null) }
+                  }
+                  body.addView(addBtn, lp(-1, -2, dp(18)))
+
+                  val secRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                  secRow.addView(TextView(this).apply {
+                      text = "Recent Records"; textSize = 17f; setTypeface(null, Typeface.BOLD); setTextColor(textDark)
+                  }, LinearLayout.LayoutParams(0, -2, 1f))
+                  secRow.addView(TextView(this).apply {
+                      text = "View All →"; textSize = 14f; setTypeface(null, Typeface.BOLD); setTextColor(greenBtn)
+                      setOnClickListener { searchText = ""; showAllRecords() }
+                  })
+                  body.addView(secRow, lp(-1, -2, dp(10)))
+
+                  if (records.isEmpty()) {
+                      body.addView(TextView(this).apply {
+                          text = "Abhi koi record nahi hai.\n'+ Add New Furniture' par tap karein."; gravity = Gravity.CENTER
+                          textSize = 15f; setTextColor(textMuted); setPadding(dp(16), dp(30), dp(16), dp(30))
+                          background = roundBg(0xFFFFFFFF.toInt(), 14)
+                      }, lp(-1, -2, dp(10)))
+                  } else {
+                      records.take(10).forEach { item -> body.addView(recordCard(item), lp(-1, -2, dp(10))) }
+                  }
+                  scroll.addView(body)
+                  page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+                  root.addView(page)
+              }
+
+              private fun recordCard(item: Furniture): LinearLayout {
+                  return LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                      background = roundBg(0xFFFFFFFF.toInt(), 14, 0xFFE2EBE6.toInt())
+                      elevation = dp(2).toFloat(); setPadding(dp(12), dp(12), dp(10), dp(12))
+
+                      val thumb = ImageView(context).apply {
+                          scaleType = ImageView.ScaleType.CENTER_CROP
+                          background = roundBg(greenLight, 10)
+                          clipToOutline = true
+                          val bmp = if (item.photo.isNotBlank() && File(item.photo).exists()) BitmapFactory.decodeFile(item.photo) else null
+                          if (bmp != null) setImageBitmap(bmp) else setImageResource(android.R.drawable.ic_menu_gallery)
+                      }
+                      addView(thumb, LinearLayout.LayoutParams(dp(74), dp(68)).apply { rightMargin = dp(12) })
+
+                      val info = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+                      info.addView(TextView(context).apply { text = item.model; textSize = 16f; setTypeface(null, Typeface.BOLD); setTextColor(textDark) })
+                      if (item.size.isNotBlank()) {
+                          info.addView(TextView(context).apply { text = "Size: ${item.size}"; textSize = 13f; setTextColor(textMuted) })
+                      }
+                      info.addView(TextView(context).apply {
+                          text = "₹ ${money(item.amount)}"; textSize = 16f; setTypeface(null, Typeface.BOLD); setTextColor(greenBtn)
+                          setPadding(0, dp(2), 0, dp(2))
+                      })
+                      info.addView(TextView(context).apply { text = "📅 ${item.dateTime}"; textSize = 11f; setTextColor(textMuted) })
+                      addView(info, LinearLayout.LayoutParams(0, -2, 1f))
+
+                      addView(TextView(context).apply {
+                          text = "⋮"; textSize = 22f; setTypeface(null, Typeface.BOLD); setTextColor(textMuted)
+                          setPadding(dp(10), dp(6), dp(6), dp(6))
+                          setOnClickListener { v ->
+                              PopupMenu(context, v).apply {
+                                  menu.add("Edit"); menu.add("Delete")
+                                  setOnMenuItemClickListener { m ->
+                                      if (m.title == "Edit") showForm(item)
+                                      else AlertDialog.Builder(context).setMessage("Delete '${item.model}'?")
+                                          .setNegativeButton("Cancel", null)
+                                          .setPositiveButton("Delete") { _, _ -> db.delete(item.id); showHome() }.show()
+                                      true
+                                  }
+                              }.show()
+                          }
+                      })
+                  }
+              }
+
+              private fun showAllRecords() {
+                  root.removeAllViews()
+                  val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
+                  page.addView(topBar("All Records", "←", { showHome() }))
+                  val searchBox = EditText(this).apply {
+                      hint = "🔍 Search Model, Size or Amount..."; setText(searchText)
+                      background = roundBg(0xFFFFFFFF.toInt(), 12, 0xFFD0DDD6.toInt())
+                      setPadding(dp(14), dp(12), dp(14), dp(12))
+                  }
+                  page.addView(searchBox, LinearLayout.LayoutParams(-1, -2).apply { setMargins(dp(14), dp(12), dp(14), dp(6)) })
+
+                  val scroll = ScrollView(this)
+                  val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(8), dp(14), dp(20)) }
+                  fun renderList(q: String) {
+                      list.removeAllViews()
+                      db.all().filter {
+                          q.isBlank() || it.model.contains(q, true) || it.size.contains(q, true) || it.amount.toString().contains(q)
+                      }.forEach { list.addView(recordCard(it), lp(-1, -2, dp(10))) }
+                  }
+                  renderList(searchText)
+                  searchBox.addTextChangedListener(object : TextWatcher {
+                      override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                      override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) { searchText = s.toString(); renderList(searchText) }
+                      override fun afterTextChanged(s: Editable?) {}
+                  })
+                  scroll.addView(list)
+                  page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+                  root.addView(page)
+              }
+
+              private fun showForm(item: Furniture?) {
+                  chosenPhoto = item?.photo ?: ""
+                  root.removeAllViews()
+                  val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
+                  val scroll = ScrollView(this)
+                  val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(16), dp(16), dp(24)) }
+
+                  val photoBox = FrameLayout(this).apply { background = roundBg(greenLight, 16, 0xFFCDE0D5.toInt()); clipToOutline = true }
+                  val img = ImageView(this).apply {
+                      scaleType = ImageView.ScaleType.CENTER_CROP
+                      val bmp = if (chosenPhoto.isNotBlank() && File(chosenPhoto).exists()) BitmapFactory.decodeFile(chosenPhoto) else null
+                      if (bmp != null) setImageBitmap(bmp) else setImageResource(android.R.drawable.ic_menu_camera)
+                  }
+                  previewImg = img
+                  photoBox.addView(img, FrameLayout.LayoutParams(-1, dp(180)))
+                  val camPill = TextView(this).apply {
+                      text = if (chosenPhoto.isNotBlank()) "📷 Change Photo" else "📷 Choose Photo"
+                      setTextColor(0xFFFFFFFF.toInt()); textSize = 14f; setTypeface(null, Typeface.BOLD)
+                      background = roundBg(0xCC111111.toInt(), 20); setPadding(dp(16), dp(8), dp(16), dp(8))
+                      setOnClickListener { pickPhoto.launch("image/*") }
+                  }
+                  photoStatus = camPill
+                  photoBox.addView(camPill, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(12) })
+                  box.addView(photoBox, lp(-1, dp(180), dp(14)))
+
+                  fun inputCard(icon: String, label: String, value: String, num: Boolean = false): EditText {
+                      val row = LinearLayout(this).apply {
+                          orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                          background = roundBg(0xFFFFFFFF.toInt(), 12, 0xFFD5E2DB.toInt())
+                          setPadding(dp(14), dp(10), dp(14), dp(10))
+                      }
+                      row.addView(TextView(this).apply { text = icon; textSize = 20f; setPadding(0, 0, dp(12), 0) })
+                      val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                      col.addView(TextView(this).apply { text = label; textSize = 12f; setTextColor(greenDark); setTypeface(null, Typeface.BOLD) })
+                      val e = EditText(this).apply {
+                          setText(value); setBackgroundColor(0); setPadding(0, dp(2), 0, 0); textSize = 16f
+                          if (num) inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+                      }
+                      col.addView(e)
+                      row.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
+                      box.addView(row, lp(-1, -2, dp(12)))
+                      return e
+                  }
+
+                  val size = inputCard("📐", "Size (e.g. 6x3 ft)", item?.size ?: "")
+                  val model = inputCard("#️⃣", "Model No. (e.g. SF-101)", item?.model ?: "")
+                  val amount = inputCard("₹", "Amount (₹)", if (item != null) item.amount.toString() else "", true)
+                  val date = inputCard("📅", "Date & Time", item?.dateTime ?: SimpleDateFormat("dd MMM yyyy, EEE • hh:mm a", Locale.getDefault()).format(Date()))
+
+                  val doSave = {
+                      val a = amount.text.toString().trim().toDoubleOrNull()
+                      if (model.text.isBlank() || a == null) toast("Model No. aur valid Amount bhariye")
+                      else {
+                          db.save(item?.id, model.text.toString().trim(), size.text.toString().trim(), a, date.text.toString().trim(), chosenPhoto)
+                          showHome(); toast("Record Saved ✓")
+                      }
+                  }
+                  val saveBtn = TextView(this).apply {
+                      text = "✓  Save Record"; textSize = 17f; setTypeface(null, Typeface.BOLD)
+                      setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER
+                      background = roundBg(greenBtn, 26); setPadding(dp(16), dp(14), dp(16), dp(14))
+                      setOnClickListener { doSave() }
+                  }
+                  box.addView(saveBtn, lp(-1, -2, dp(10)))
+                  scroll.addView(box)
+                  page.addView(topBar(if (item == null) "Add Furniture" else "Edit Furniture", "←", { showHome() }, "💾", doSave))
+                  page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+                  root.addView(page)
+              }
+
+              private fun showBackup() {
+                  root.removeAllViews()
+                  val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
+                  page.addView(topBar("Backup & Restore", "←", { showHome() }))
+                  val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(18), dp(20), dp(18), dp(20)) }
+                  body.addView(TextView(this).apply { text = "☁️"; textSize = 54f; gravity = Gravity.CENTER })
+                  body.addView(TextView(this).apply { text = "Keep your data safe"; textSize = 16f; setTypeface(null, Typeface.BOLD); gravity = Gravity.CENTER; setTextColor(textDark) }, lp(-1, -2, dp(18)))
+
+                  fun bCard(title: String, sub: String, bg: Int, stroke: Int, onClick: () -> Unit) {
+                      val c = LinearLayout(this).apply {
+                          orientation = LinearLayout.VERTICAL; background = roundBg(bg, 14, stroke)
+                          setPadding(dp(16), dp(16), dp(16), dp(16)); setOnClickListener { onClick() }
+                      }
+                      c.addView(TextView(this).apply { text = title; textSize = 16f; setTypeface(null, Typeface.BOLD); setTextColor(textDark) })
+                      c.addView(TextView(this).apply { text = sub; textSize = 13f; setTextColor(textMuted) })
+                      body.addView(c, lp(-1, -2, dp(12)))
+                  }
+                  bCard("✓ Automatic Backup (Android)", "Data is backed up automatically on device", greenLight, 0xFF81C784.toInt()) { toast("Auto Backup On ✓") }
+                  bCard("💾 Manual Backup (Save File)", "Save all records & photos to a file", 0xFFE3F2FD.toInt(), 0xFF90CAF9.toInt()) { exportBackup.launch("FurnitureHisabBackup.json") }
+                  bCard("📂 Restore Data", "Restore from your backup JSON file", 0xFFFFFFFF.toInt(), 0xFFD0DDD6.toInt()) { importBackup.launch(arrayOf("application/json", "text/*")) }
+                  page.addView(body)
+                  root.addView(page)
+              }
+
+              private fun showSettings() {
+                  root.removeAllViews()
+                  val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
+                  page.addView(topBar("Settings", "←", { showHome() }))
+                  val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(16), dp(16), dp(16)) }
+                  fun row(title: String, right: String, onClick: () -> Unit) {
+                      val r = LinearLayout(this).apply {
+                          orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                          background = roundBg(0xFFFFFFFF.toInt(), 12, 0xFFE0EAE4.toInt())
+                          setPadding(dp(16), dp(16), dp(16), dp(16)); setOnClickListener { onClick() }
+                      }
+                      r.addView(TextView(this).apply { text = title; textSize = 16f; setTextColor(textDark) }, LinearLayout.LayoutParams(0, -2, 1f))
+                      r.addView(TextView(this).apply { text = right; textSize = 14f; setTextColor(greenBtn) })
+                      body.addView(r, lp(-1, -2, dp(10)))
+                  }
+                  row("☁️ Backup Settings", "Auto Backup On >") { showBackup() }
+                  row("📂 Restore Data", ">") { importBackup.launch(arrayOf("application/json", "text/*")) }
+                  row("ℹ️ About App", "Furniture Hisab v1.0 >") { toast("Furniture Hisab v1.0 - Green & White Edition") }
+                  row("⭐ Rate Us", "Give 5 Stars >") { toast("Thank you for 5 Stars! ⭐") }
+                  row("🔗 Share App", ">") {
+                      startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                          type = "text/plain"; putExtra(Intent.EXTRA_TEXT, "Furniture Hisab App - Apne Furniture ka Sahi Hisab, Hamesha Saath!")
+                      }, "Share Furniture Hisab"))
+                  }
+                  row("✉️ Contact Us", ">") { toast("Furniture Hisab Support") }
+                  page.addView(body)
+                  root.addView(page)
+              }
+
+              private fun makeBackup(): JSONObject {
+                  val arr = JSONArray()
+                  db.all().forEach { f ->
+                      val obj = JSONObject().put("id", f.id).put("model", f.model).put("size", f.size)
+                          .put("amount", f.amount).put("dateTime", f.dateTime)
+                      if (f.photo.isNotBlank() && File(f.photo).exists()) {
+                          obj.put("photoName", File(f.photo).name).put("photoBase64", Base64.encodeToString(File(f.photo).readBytes(), Base64.NO_WRAP))
+                      }
+                      arr.put(obj)
+                  }
+                  return JSONObject().put("app", "FurnitureHisab").put("version", 1).put("items", arr)
+              }
+              private fun restoreBackup(data: JSONObject) {
+                  val arr = data.getJSONArray("items")
+                  db.clear()
+                  for (i in 0 until arr.length()) {
+                      val o = arr.getJSONObject(i)
+                      var photo = ""
+                      if (o.has("photoBase64")) {
+                          val name = o.optString("photoName", "restored_$i.jpg").replace(Regex("[^A-Za-z0-9._-]"), "_")
+                          val file = File(filesDir, name)
+                          file.writeBytes(Base64.decode(o.getString("photoBase64"), Base64.DEFAULT))
+                          photo = file.absolutePath
+                      }
+                      db.save(null, o.optString("model"), o.optString("size"), o.optDouble("amount"), o.optString("dateTime"), photo)
+                  }
+              }
+              private fun money(v: Double) = String.format(Locale("en", "IN"), "%,.0f", v)
+              private fun lp(w: Int, h: Int, bottom: Int = 0) = LinearLayout.LayoutParams(w, h).apply { if (bottom > 0) bottomMargin = bottom }
+              private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+          }
+          KTEOF
 
       - name: Build Debug APK
         run: |
