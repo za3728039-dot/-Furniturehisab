@@ -25,30 +25,58 @@ jobs:
             [ -f "$z" ] && unzip -o "$z" -d extracted
           done
 
-      - name: Apply ZFH 3D Icon + Instagram 5-Tab UI + Date-wise Hisab
+      - name: Apply ZFH 3D Icon + Camera & Gallery + 5-Tab UI
         run: |
           PROJECT_DIR=$(dirname "$(find . -maxdepth 5 \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) | head -n 1)")
           APP_DIR="$PROJECT_DIR/app"
           find "$APP_DIR/src/main/res" -name "ic_launcher*" -delete
-          pip install -q pillow || true
+          python3 -m pip install -q pillow || true
           python3 - "$APP_DIR/src/main/res" << 'PYICON'
-          import os, sys, glob
+          import os, sys, zlib, struct
           res_dir = sys.argv[1]
-          candidates = [f for f in glob.glob("*.*") if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))]
+          candidates = []
+          for root_d, dirs, files in os.walk("."):
+              if "extracted" in root_d or ".git" in root_d:
+                  continue
+              for f in files:
+                  if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                      candidates.append(os.path.join(root_d, f))
           candidates.sort(key=lambda x: (0 if "app_icon" in x.lower() else 1, -os.path.getsize(x)))
+          done = False
           if candidates:
-              from PIL import Image
-              im = Image.open(candidates[0]).convert("RGBA")
-              w, h = im.size
-              m = min(w, h)
-              im = im.crop(((w - m) // 2, (h - m) // 2, (w + m) // 2, (h + m) // 2))
+              try:
+                  from PIL import Image
+                  im = Image.open(candidates[0]).convert("RGBA")
+                  w, h = im.size
+                  m = min(w, h)
+                  im = im.crop(((w - m) // 2, (h - m) // 2, (w + m) // 2, (h + m) // 2))
+                  for folder, sz in [("mipmap-mdpi", 48), ("mipmap-hdpi", 72), ("mipmap-xhdpi", 96), ("mipmap-xxhdpi", 144), ("mipmap-xxxhdpi", 192)]:
+                      out_dir = os.path.join(res_dir, folder)
+                      os.makedirs(out_dir, exist_ok=True)
+                      resized = im.resize((sz, sz), Image.LANCZOS)
+                      resized.save(os.path.join(out_dir, "ic_launcher.png"))
+                      resized.save(os.path.join(out_dir, "ic_launcher_round.png"))
+                  done = True
+              except Exception:
+                  pass
+          if not done:
+              def write_png(path, size):
+                  w = h = size
+                  rows = []
+                  for y in range(h):
+                      row = bytearray([0])
+                      for x in range(w):
+                          row.extend([11, 70, 40, 255])
+                      rows.append(bytes(row))
+                  raw = b"".join(rows)
+                  def chunk(tag, data):
+                      return struct.pack("!I", len(data)) + tag + data + struct.pack("!I", zlib.crc32(tag + data) & 0xffffffff)
+                  png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack("!IIBBBBB", w, h, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
+                  os.makedirs(os.path.dirname(path), exist_ok=True)
+                  open(path, "wb").write(png)
               for folder, sz in [("mipmap-mdpi", 48), ("mipmap-hdpi", 72), ("mipmap-xhdpi", 96), ("mipmap-xxhdpi", 144), ("mipmap-xxxhdpi", 192)]:
-                  out_dir = os.path.join(res_dir, folder)
-                  os.makedirs(out_dir, exist_ok=True)
-                  resized = im.resize((sz, sz), Image.LANCZOS)
-                  resized.save(os.path.join(out_dir, "ic_launcher.png"))
-                  resized.save(os.path.join(out_dir, "ic_launcher_round.png"))
-              print("Applied custom icon:", candidates[0])
+                  write_png(os.path.join(res_dir, folder, "ic_launcher.png"), sz)
+                  write_png(os.path.join(res_dir, folder, "ic_launcher_round.png"), sz)
           PYICON
           MANIFEST=$(find "$APP_DIR/src/main" -name "AndroidManifest.xml" | head -n 1)
           python3 - "$MANIFEST" << 'PYM'
@@ -78,6 +106,7 @@ jobs:
           import android.content.Intent
           import android.database.sqlite.SQLiteDatabase
           import android.database.sqlite.SQLiteOpenHelper
+          import android.graphics.Bitmap
           import android.graphics.BitmapFactory
           import android.graphics.Typeface
           import android.graphics.drawable.GradientDrawable
@@ -192,6 +221,15 @@ jobs:
                       contentResolver.openInputStream(uri)?.use { input -> dest.outputStream().use { input.copyTo(it) } }
                       chosenPhoto = dest.absolutePath
                       BitmapFactory.decodeFile(chosenPhoto)?.let { previewImg?.setImageBitmap(it) }
+                      photoStatus?.text = "📷 Change Photo ✓"
+                  }
+              }
+              private val takeCameraPhoto = registerForActivityResult(ActivityResultContracts.TakePicturePreview()) { bmp ->
+                  if (bmp != null) {
+                      val dest = File(filesDir, "photo_${System.currentTimeMillis()}.jpg")
+                      dest.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+                      chosenPhoto = dest.absolutePath
+                      previewImg?.setImageBitmap(bmp)
                       photoStatus?.text = "📷 Change Photo ✓"
                   }
               }
@@ -725,202 +763,13 @@ jobs:
                       text = if (chosenPhoto.isNotBlank()) "📷 Change Photo" else "📷 Choose Photo"
                       setTextColor(0xFFFFFFFF.toInt()); textSize = 14f; setTypeface(null, Typeface.BOLD)
                       background = roundBg(0xCC111111.toInt(), 20); setPadding(dp(16), dp(8), dp(16), dp(8))
-                      setOnClickListener { pickPhoto.launch("image/*") }
+                      setOnClickListener {
+                          AlertDialog.Builder(this@MainActivity)
+                              .setTitle("Select Furniture Photo")
+                              .setItems(arrayOf("📷 Camera (फोटो खींचें)", "🖼️ Gallery (गैलरी से चुनें)")) { _, which ->
+                                  if (which == 0) takeCameraPhoto.launch(null) else pickPhoto.launch("image/*")
+                              }.show()
+                      }
                   }
                   photoStatus = camPill
-                  photoBox.addView(camPill, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(12) })
-                  box.addView(photoBox, lp(-1, dp(180), dp(14)))
-
-                  fun inputCard(icon: String, label: String, value: String, num: Boolean = false): EditText {
-                      val row = LinearLayout(this).apply {
-                          orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-                          background = roundBg(0xFFFFFFFF.toInt(), 12, 0xFFD5E2DB.toInt())
-                          setPadding(dp(14), dp(10), dp(14), dp(10))
-                      }
-                      row.addView(TextView(this).apply { text = icon; textSize = 20f; setPadding(0, 0, dp(12), 0) })
-                      val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                      col.addView(TextView(this).apply { text = label; textSize = 12f; setTextColor(greenDark); setTypeface(null, Typeface.BOLD) })
-                      val e = EditText(this).apply {
-                          setText(value); setBackgroundColor(0); setPadding(0, dp(2), 0, 0); textSize = 16f
-                          if (num) inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
-                      }
-                      col.addView(e)
-                      row.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
-                      box.addView(row, lp(-1, -2, dp(12)))
-                      return e
-                  }
-
-                  val size = inputCard("📐", "Size (e.g. 6x3 ft)", item?.size ?: "")
-                  val model = inputCard("#️⃣", "Model No. (e.g. SF-101)", item?.model ?: "")
-                  val amount = inputCard("₹", "Amount (₹)", if (item != null) item.amount.toString() else "", true)
-                  val date = inputCard("📅", "Date & Time", item?.dateTime ?: SimpleDateFormat("dd MMM yyyy, EEE • hh:mm a", Locale.getDefault()).format(Date()))
-
-                  val doSave = {
-                      val a = amount.text.toString().trim().toDoubleOrNull()
-                      if (model.text.isBlank() || a == null) toast("Model No. aur valid Amount bhariye")
-                      else {
-                          db.save(item?.id, model.text.toString().trim(), size.text.toString().trim(), a, date.text.toString().trim(), chosenPhoto, item?.createdMs ?: System.currentTimeMillis())
-                          openTab(0); toast("Record Saved ✓")
-                      }
-                  }
-                  val saveBtn = TextView(this).apply {
-                      text = "✓  Save Record"; textSize = 17f; setTypeface(null, Typeface.BOLD)
-                      setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER
-                      background = roundBg(greenBtn, 26); setPadding(dp(16), dp(14), dp(16), dp(14))
-                      setOnClickListener { doSave() }
-                  }
-                  box.addView(saveBtn, lp(-1, -2, dp(10)))
-                  scroll.addView(box)
-
-                  val bar = LinearLayout(this).apply {
-                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-                      setBackgroundColor(greenDark); setPadding(dp(14), dp(14), dp(14), dp(14))
-                      addView(TextView(context).apply {
-                          text = "←"; textSize = 22f; setTextColor(0xFFFFFFFF.toInt())
-                          setPadding(dp(8), dp(4), dp(12), dp(4)); setOnClickListener { openTab(currentTab) }
-                      })
-                      addView(TextView(context).apply {
-                          text = if (item == null) "Add Furniture" else "Edit Furniture"; textSize = 20f
-                          setTypeface(null, Typeface.BOLD); setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER
-                      }, LinearLayout.LayoutParams(0, -2, 1f))
-                      addView(TextView(context).apply {
-                          text = "💾"; textSize = 20f; setTextColor(0xFFFFFFFF.toInt())
-                          setPadding(dp(12), dp(4), dp(8), dp(4)); setOnClickListener { doSave() }
-                      })
-                  }
-                  page.addView(bar)
-                  page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-                  root.addView(page)
-              }
-
-              private fun showBackup() {
-                  root.removeAllViews()
-                  val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
-                  val bar = LinearLayout(this).apply {
-                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-                      setBackgroundColor(greenDark); setPadding(dp(14), dp(14), dp(14), dp(14))
-                      addView(TextView(context).apply {
-                          text = "←"; textSize = 22f; setTextColor(0xFFFFFFFF.toInt())
-                          setPadding(dp(8), dp(4), dp(12), dp(4)); setOnClickListener { openTab(currentTab) }
-                      })
-                      addView(TextView(context).apply {
-                          text = "Backup & Restore"; textSize = 20f; setTypeface(null, Typeface.BOLD)
-                          setTextColor(0xFFFFFFFF.toInt())
-                      })
-                  }
-                  page.addView(bar)
-                  val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(18), dp(20), dp(18), dp(20)) }
-                  body.addView(TextView(this).apply { text = "☁️"; textSize = 54f; gravity = Gravity.CENTER })
-                  body.addView(TextView(this).apply { text = "Keep your data safe"; textSize = 16f; setTypeface(null, Typeface.BOLD); gravity = Gravity.CENTER; setTextColor(textDark) }, lp(-1, -2, dp(18)))
-
-                  fun bCard(title: String, sub: String, bg: Int, stroke: Int, onClick: () -> Unit) {
-                      val c = LinearLayout(this).apply {
-                          orientation = LinearLayout.VERTICAL; background = roundBg(bg, 14, stroke)
-                          setPadding(dp(16), dp(16), dp(16), dp(16)); setOnClickListener { onClick() }
-                      }
-                      c.addView(TextView(this).apply { text = title; textSize = 16f; setTypeface(null, Typeface.BOLD); setTextColor(textDark) })
-                      c.addView(TextView(this).apply { text = sub; textSize = 13f; setTextColor(textMuted) })
-                      body.addView(c, lp(-1, -2, dp(12)))
-                  }
-                  bCard("✓ Automatic Backup (Android)", "Data is backed up automatically on device", greenLight, 0xFF81C784.toInt()) { toast("Auto Backup On ✓") }
-                  bCard("💾 Manual Backup (Save File)", "Save all furniture, photos & hisab transactions", 0xFFE3F2FD.toInt(), 0xFF90CAF9.toInt()) { exportBackup.launch("FurnitureHisabBackup.json") }
-                  bCard("📂 Restore Data", "Restore from your backup JSON file", 0xFFFFFFFF.toInt(), 0xFFD0DDD6.toInt()) { importBackup.launch(arrayOf("application/json", "text/*")) }
-                  page.addView(body)
-                  root.addView(page)
-              }
-
-              private fun showSettings() {
-                  val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
-                  page.addView(topBar("Profile & Settings"))
-                  val scroll = ScrollView(this)
-                  val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(16), dp(16), dp(20)) }
-                  fun row(title: String, right: String, onClick: () -> Unit) {
-                      val r = LinearLayout(this).apply {
-                          orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-                          background = roundBg(0xFFFFFFFF.toInt(), 12, 0xFFE0EAE4.toInt())
-                          setPadding(dp(16), dp(16), dp(16), dp(16)); setOnClickListener { onClick() }
-                      }
-                      r.addView(TextView(this).apply { text = title; textSize = 16f; setTextColor(textDark) }, LinearLayout.LayoutParams(0, -2, 1f))
-                      r.addView(TextView(this).apply { text = right; textSize = 14f; setTextColor(greenBtn) })
-                      body.addView(r, lp(-1, -2, dp(10)))
-                  }
-                  row("🔒 Fingerprint / Screen Lock", if (isLockEnabled()) "ON >" else "OFF >") {
-                      prefs().edit().putBoolean("screen_lock", !isLockEnabled()).apply()
-                      toast(if (isLockEnabled()) "App Lock ON ✓" else "App Lock OFF")
-                      showSettings()
-                  }
-                  row("🔄 नया हिसाब चालू करें", "Reset >") { startNewHisab() }
-                  row("☁️ Backup Settings", "Auto Backup On >") { showBackup() }
-                  row("📂 Restore Data", ">") { importBackup.launch(arrayOf("application/json", "text/*")) }
-                  row("ℹ️ About App", "Furniture Hisab v2.2 >") { toast("Furniture Hisab v2.2 - ZFH Edition") }
-                  row("🔗 Share App", ">") {
-                      startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
-                          type = "text/plain"; putExtra(Intent.EXTRA_TEXT, "Furniture Hisab App - Apne Furniture ka Sahi Hisab, Hamesha Saath!")
-                      }, "Share Furniture Hisab"))
-                  }
-                  scroll.addView(body)
-                  page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-                  wrapWithBottomBar(page)
-              }
-
-              private fun makeBackup(): JSONObject {
-                  val arr = JSONArray()
-                  db.all().forEach { f ->
-                      val obj = JSONObject().put("id", f.id).put("model", f.model).put("size", f.size)
-                          .put("amount", f.amount).put("dateTime", f.dateTime).put("createdMs", f.createdMs)
-                      if (f.photo.isNotBlank() && File(f.photo).exists()) {
-                          obj.put("photoName", File(f.photo).name).put("photoBase64", Base64.encodeToString(File(f.photo).readBytes(), Base64.NO_WRAP))
-                      }
-                      arr.put(obj)
-                  }
-                  val pArr = JSONArray()
-                  db.allPayments().forEach { p ->
-                      pArr.put(JSONObject().put("id", p.id).put("amount", p.amount).put("note", p.note).put("dateTime", p.dateTime).put("createdMs", p.createdMs))
-                  }
-                  return JSONObject().put("app", "FurnitureHisab").put("version", 4).put("items", arr).put("payments", pArr)
-              }
-              private fun restoreBackup(data: JSONObject) {
-                  val arr = data.getJSONArray("items")
-                  db.clearAll()
-                  for (i in 0 until arr.length()) {
-                      val o = arr.getJSONObject(i)
-                      var photo = ""
-                      if (o.has("photoBase64")) {
-                          val name = o.optString("photoName", "restored_$i.jpg").replace(Regex("[^A-Za-z0-9._-]"), "_")
-                          val file = File(filesDir, name)
-                          file.writeBytes(Base64.decode(o.getString("photoBase64"), Base64.DEFAULT))
-                          photo = file.absolutePath
-                      }
-                      db.save(null, o.optString("model"), o.optString("size"), o.optDouble("amount"), o.optString("dateTime"), photo, o.optLong("createdMs", System.currentTimeMillis()))
-                  }
-                  if (data.has("payments")) {
-                      val pArr = data.getJSONArray("payments")
-                      for (i in 0 until pArr.length()) {
-                          val o = pArr.getJSONObject(i)
-                          db.savePayment(null, o.optDouble("amount"), o.optString("note"), o.optString("dateTime"), o.optLong("createdMs", System.currentTimeMillis()))
-                      }
-                  }
-              }
-              private fun money(v: Double) = String.format(Locale("en", "IN"), "%,.0f", v)
-              private fun lp(w: Int, h: Int, bottom: Int = 0) = LinearLayout.LayoutParams(w, h).apply { if (bottom > 0) bottomMargin = bottom }
-              private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
-          }
-          KTEOF
-
-      - name: Build Debug APK
-        run: |
-          PROJECT_DIR=$(dirname "$(find . -maxdepth 5 \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) | head -n 1)")
-          printf 'allprojects {\n  tasks.configureEach { t ->\n    if (t.hasProperty("kotlinOptions")) { t.kotlinOptions.jvmTarget = "1.8" }\n  }\n}\n' > /tmp/fix-jvm.gradle
-          cd "$PROJECT_DIR"
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-            ./gradlew assembleDebug --init-script /tmp/fix-jvm.gradle
-          else
-            gradle assembleDebug --init-script /tmp/fix-jvm.gradle
-          fi
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: FurnitureHisab-APK
-          path: "**/build/outputs/apk/debug/*.apk"
+                  photoBox.addView
