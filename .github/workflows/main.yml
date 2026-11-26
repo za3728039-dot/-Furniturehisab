@@ -25,7 +25,7 @@ jobs:
             [ -f "$z" ] && unzip -o "$z" -d extracted
           done
 
-      - name: Upgrade App to Same-to-Same 6-Screen Green & White UI
+      - name: Upgrade App with Green & White UI + Fingerprint/Screen Lock
         run: |
           PROJECT_DIR=$(dirname "$(find . -maxdepth 5 \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) | head -n 1)")
           APP_DIR="$PROJECT_DIR/app"
@@ -55,7 +55,9 @@ jobs:
           cat << 'KTEOF' > "$MAIN_KT"
           package com.example.furniturehisab
 
+          import android.app.Activity
           import android.app.AlertDialog
+          import android.app.KeyguardManager
           import android.content.ContentValues
           import android.content.Context
           import android.content.Intent
@@ -128,6 +130,12 @@ jobs:
               private val textDark = 0xFF14201A.toInt()
               private val textMuted = 0xFF5F6F67.toInt()
 
+              private fun prefs() = getSharedPreferences("fh_prefs", Context.MODE_PRIVATE)
+              private fun isLockEnabled() = prefs().getBoolean("screen_lock", true)
+
+              private val authLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+                  if (res.resultCode == Activity.RESULT_OK) showHome() else showLockedScreen()
+              }
               private val pickPhoto = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
                   if (uri != null) {
                       val dest = File(filesDir, "photo_${System.currentTimeMillis()}.jpg")
@@ -182,7 +190,46 @@ jobs:
                       setPadding(0, dp(8), 0, 0)
                   })
                   root.addView(splash)
-                  Handler(Looper.getMainLooper()).postDelayed({ showHome() }, 1200)
+                  Handler(Looper.getMainLooper()).postDelayed({ checkAuthAndOpen() }, 1100)
+              }
+
+              @Suppress("DEPRECATION")
+              private fun checkAuthAndOpen() {
+                  if (!isLockEnabled()) { showHome(); return }
+                  val km = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+                  if (km.isKeyguardSecure) {
+                      val intent = km.createConfirmDeviceCredentialIntent(
+                          "Furniture Hisab Locked",
+                          "Fingerprint, Face Lock ya Screen Lock se unlock karein"
+                      )
+                      if (intent != null) { showLockedScreen(); authLauncher.launch(intent); return }
+                  }
+                  showHome()
+              }
+
+              private fun showLockedScreen() {
+                  root.removeAllViews()
+                  val lockPage = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+                      background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0xFF146C43.toInt(), 0xFF062C1A.toInt()))
+                      setPadding(dp(28), dp(28), dp(28), dp(28))
+                  }
+                  lockPage.addView(TextView(this).apply { text = "🔒"; textSize = 64f; gravity = Gravity.CENTER }, lp(-1, -2, dp(14)))
+                  lockPage.addView(TextView(this).apply {
+                      text = "Furniture Hisab Locked"; textSize = 24f; setTypeface(null, Typeface.BOLD)
+                      setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER
+                  }, lp(-1, -2, dp(8)))
+                  lockPage.addView(TextView(this).apply {
+                      text = "Fingerprint, Face Lock ya Screen Lock lagayein"; textSize = 15f
+                      setTextColor(0xFFC8E6C9.toInt()); gravity = Gravity.CENTER
+                  }, lp(-1, -2, dp(28)))
+                  lockPage.addView(TextView(this).apply {
+                      text = "🔓  Unlock App"; textSize = 17f; setTypeface(null, Typeface.BOLD)
+                      setTextColor(greenDark); gravity = Gravity.CENTER
+                      background = roundBg(0xFFFFFFFF.toInt(), 26); setPadding(dp(28), dp(14), dp(28), dp(14))
+                      setOnClickListener { checkAuthAndOpen() }
+                  })
+                  root.addView(lockPage)
               }
 
               private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
@@ -462,6 +509,11 @@ jobs:
                       r.addView(TextView(this).apply { text = title; textSize = 16f; setTextColor(textDark) }, LinearLayout.LayoutParams(0, -2, 1f))
                       r.addView(TextView(this).apply { text = right; textSize = 14f; setTextColor(greenBtn) })
                       body.addView(r, lp(-1, -2, dp(10)))
+                  }
+                  row("🔒 Fingerprint / Screen Lock", if (isLockEnabled()) "ON >" else "OFF >") {
+                      prefs().edit().putBoolean("screen_lock", !isLockEnabled()).apply()
+                      toast(if (isLockEnabled()) "App Lock ON ✓" else "App Lock OFF")
+                      showSettings()
                   }
                   row("☁️ Backup Settings", "Auto Backup On >") { showBackup() }
                   row("📂 Restore Data", ">") { importBackup.launch(arrayOf("application/json", "text/*")) }
