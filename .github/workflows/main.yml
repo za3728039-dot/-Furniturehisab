@@ -25,22 +25,23 @@ jobs:
             [ -f "$z" ] && unzip -o "$z" -d extracted
           done
 
-      - name: Upgrade App with Green & White UI + Fingerprint/Screen Lock
+      - name: Force Green & White Furniture Icon + Premium UI
         run: |
           PROJECT_DIR=$(dirname "$(find . -maxdepth 5 \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) | head -n 1)")
           APP_DIR="$PROJECT_DIR/app"
+          find "$APP_DIR/src/main/res" -name "ic_launcher*" -delete
           mkdir -p "$APP_DIR/src/main/res/drawable" "$APP_DIR/src/main/res/mipmap-anydpi-v26"
           cat << 'EOF' > "$APP_DIR/src/main/res/drawable/ic_launcher_bg.xml"
-          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-            <gradient android:startColor="#146C43" android:endColor="#07301C" android:angle="270"/>
-          </shape>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+            <path android:fillColor="#0B4628" android:pathData="M0,0 h108 v108 h-108 z"/>
+          </vector>
           EOF
           cat << 'EOF' > "$APP_DIR/src/main/res/drawable/ic_launcher_fg.xml"
           <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
-            <path android:fillColor="#FFFFFF" android:pathData="M54,22 L24,45 L29,45 L29,48 L54,29 L79,48 L79,45 L84,45 Z"/>
-            <path android:fillColor="#FFFFFF" android:pathData="M50,35 h8 v8 h-8 z"/>
-            <path android:fillColor="#FFFFFF" android:pathData="M31,55 c0,-3 2,-5 5,-5 h36 c3,0 5,2 5,5 v8 h-46 z"/>
-            <path android:fillColor="#FFFFFF" android:pathData="M27,63 h54 c2,0 4,2 4,4 v10 c0,2 -2,4 -4,4 h-4 v4 h-6 v-4 h-34 v4 h-6 v-4 h-4 c-2,0 -4,-2 -4,-4 v-10 c0,-2 2,-4 4,-4 z"/>
+            <path android:fillColor="#FFFFFF" android:pathData="M54,23 L24,46 L29,46 L29,49 L54,30 L79,49 L79,46 L84,46 Z"/>
+            <path android:fillColor="#FFFFFF" android:pathData="M50,36 h8 v8 h-8 z"/>
+            <path android:fillColor="#FFFFFF" android:pathData="M32,55 c0,-3 2,-5 5,-5 h34 c3,0 5,2 5,5 v7 h-44 z"/>
+            <path android:fillColor="#FFFFFF" android:pathData="M28,62 h52 c2,0 4,2 4,4 v9 c0,2 -2,4 -4,4 h-4 v4 h-6 v-4 h-32 v4 h-6 v-4 h-4 c-2,0 -4,-2 -4,-4 v-9 c0,-2 2,-4 4,-4 z"/>
             <path android:fillColor="#FFD43B" android:pathData="M26,84 Q54,79 82,85 Q54,83 26,84 Z"/>
           </vector>
           EOF
@@ -51,6 +52,15 @@ jobs:
           </adaptive-icon>
           EOF
           cp "$APP_DIR/src/main/res/mipmap-anydpi-v26/ic_launcher.xml" "$APP_DIR/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml"
+          MANIFEST=$(find "$APP_DIR/src/main" -name "AndroidManifest.xml" | head -n 1)
+          python3 - "$MANIFEST" << 'PYM'
+          import sys, re
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          s = re.sub(r'android:icon="[^"]*"', 'android:icon="@mipmap/ic_launcher"', s)
+          s = re.sub(r'android:roundIcon="[^"]*"', 'android:roundIcon="@mipmap/ic_launcher_round"', s)
+          open(p, 'w', encoding='utf-8').write(s)
+          PYM
           MAIN_KT=$(find "$APP_DIR/src/main" -name "MainActivity.kt" | head -n 1)
           cat << 'KTEOF' > "$MAIN_KT"
           package com.example.furniturehisab
