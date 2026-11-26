@@ -25,51 +25,30 @@ jobs:
             [ -f "$z" ] && unzip -o "$z" -d extracted
           done
 
-      - name: Fix System Bar Insets + Generate Real PNG Green Furniture Icon
+      - name: Apply ZFH 3D Icon + Instagram 5-Tab UI + Date-wise Hisab
         run: |
           PROJECT_DIR=$(dirname "$(find . -maxdepth 5 \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) | head -n 1)")
           APP_DIR="$PROJECT_DIR/app"
           find "$APP_DIR/src/main/res" -name "ic_launcher*" -delete
+          pip install -q pillow || true
           python3 - "$APP_DIR/src/main/res" << 'PYICON'
-          import os, sys, zlib, struct
+          import os, sys, glob
           res_dir = sys.argv[1]
-          def write_png(path, size):
-              w = h = size
-              rows = []
-              for y in range(h):
-                  row = bytearray([0])
-                  ny = y / float(h)
-                  for x in range(w):
-                      nx = x / float(w)
-                      r, g, b, a = 11, 70, 40, 255
-                      # White house roof
-                      if 0.18 <= ny <= 0.44 and abs(nx - 0.5) <= (ny - 0.16) * 1.15 and abs(nx - 0.5) >= (ny - 0.22) * 1.15:
-                          r, g, b = 255, 255, 255
-                      # White window
-                      elif 0.31 <= ny <= 0.39 and 0.46 <= nx <= 0.54:
-                          r, g, b = 255, 255, 255
-                      # White sofa back & seat
-                      elif 0.48 <= ny <= 0.60 and 0.26 <= nx <= 0.74:
-                          r, g, b = 255, 255, 255
-                      elif 0.56 <= ny <= 0.72 and 0.22 <= nx <= 0.78:
-                          r, g, b = 255, 255, 255
-                      # Sofa legs
-                      elif 0.72 <= ny <= 0.77 and (0.26 <= nx <= 0.32 or 0.68 <= nx <= 0.74):
-                          r, g, b = 255, 255, 255
-                      # Gold curve
-                      elif 0.80 <= ny <= 0.84 and 0.20 <= nx <= 0.80:
-                          r, g, b = 255, 212, 59
-                      row.extend([r, g, b, a])
-                  rows.append(bytes(row))
-              raw = b"".join(rows)
-              def chunk(tag, data):
-                  return struct.pack("!I", len(data)) + tag + data + struct.pack("!I", zlib.crc32(tag + data) & 0xffffffff)
-              png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack("!IIBBBBB", w, h, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
-              os.makedirs(os.path.dirname(path), exist_ok=True)
-              open(path, "wb").write(png)
-          for folder, sz in [("mipmap-mdpi", 48), ("mipmap-hdpi", 72), ("mipmap-xhdpi", 96), ("mipmap-xxhdpi", 144), ("mipmap-xxxhdpi", 192)]:
-              write_png(os.path.join(res_dir, folder, "ic_launcher.png"), sz)
-              write_png(os.path.join(res_dir, folder, "ic_launcher_round.png"), sz)
+          candidates = [f for f in glob.glob("*.*") if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))]
+          candidates.sort(key=lambda x: (0 if "app_icon" in x.lower() else 1, -os.path.getsize(x)))
+          if candidates:
+              from PIL import Image
+              im = Image.open(candidates[0]).convert("RGBA")
+              w, h = im.size
+              m = min(w, h)
+              im = im.crop(((w - m) // 2, (h - m) // 2, (w + m) // 2, (h + m) // 2))
+              for folder, sz in [("mipmap-mdpi", 48), ("mipmap-hdpi", 72), ("mipmap-xhdpi", 96), ("mipmap-xxhdpi", 144), ("mipmap-xxxhdpi", 192)]:
+                  out_dir = os.path.join(res_dir, folder)
+                  os.makedirs(out_dir, exist_ok=True)
+                  resized = im.resize((sz, sz), Image.LANCZOS)
+                  resized.save(os.path.join(out_dir, "ic_launcher.png"))
+                  resized.save(os.path.join(out_dir, "ic_launcher_round.png"))
+              print("Applied custom icon:", candidates[0])
           PYICON
           MANIFEST=$(find "$APP_DIR/src/main" -name "AndroidManifest.xml" | head -n 1)
           python3 - "$MANIFEST" << 'PYM'
@@ -873,7 +852,7 @@ jobs:
                   row("🔄 नया हिसाब चालू करें", "Reset >") { startNewHisab() }
                   row("☁️ Backup Settings", "Auto Backup On >") { showBackup() }
                   row("📂 Restore Data", ">") { importBackup.launch(arrayOf("application/json", "text/*")) }
-                  row("ℹ️ About App", "Furniture Hisab v2.1 >") { toast("Furniture Hisab v2.1 - Green & White Edition") }
+                  row("ℹ️ About App", "Furniture Hisab v2.2 >") { toast("Furniture Hisab v2.2 - ZFH Edition") }
                   row("🔗 Share App", ">") {
                       startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
                           type = "text/plain"; putExtra(Intent.EXTRA_TEXT, "Furniture Hisab App - Apne Furniture ka Sahi Hisab, Hamesha Saath!")
