@@ -25,7 +25,7 @@ jobs:
             [ -f "$z" ] && unzip -o "$z" -d extracted
           done
 
-      - name: Force Green & White Furniture Icon + Premium UI
+      - name: Upgrade App to Instagram-Style Bottom Bar + Date-wise Hisab
         run: |
           PROJECT_DIR=$(dirname "$(find . -maxdepth 5 \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) | head -n 1)")
           APP_DIR="$PROJECT_DIR/app"
@@ -67,6 +67,7 @@ jobs:
 
           import android.app.Activity
           import android.app.AlertDialog
+          import android.app.DatePickerDialog
           import android.app.KeyguardManager
           import android.content.ContentValues
           import android.content.Context
@@ -92,36 +93,66 @@ jobs:
           import org.json.JSONObject
           import java.io.File
           import java.text.SimpleDateFormat
+          import java.util.Calendar
           import java.util.Date
           import java.util.Locale
 
           data class Furniture(
               val id: Long, val model: String, val size: String, val amount: Double,
-              val dateTime: String, val photo: String
+              val dateTime: String, val photo: String, val createdMs: Long
           )
 
-          class Db(context: Context) : SQLiteOpenHelper(context, "furniture.db", null, 1) {
+          data class Payment(
+              val id: Long, val amount: Double, val note: String, val dateTime: String, val createdMs: Long
+          )
+
+          class Db(context: Context) : SQLiteOpenHelper(context, "furniture.db", null, 4) {
               override fun onCreate(db: SQLiteDatabase) {
-                  db.execSQL("CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT, model TEXT, size TEXT, amount REAL, dateTime TEXT, photo TEXT)")
+                  db.execSQL("CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT, model TEXT, size TEXT, amount REAL, dateTime TEXT, photo TEXT, createdMs INTEGER DEFAULT 0)")
+                  db.execSQL("CREATE TABLE payments(id INTEGER PRIMARY KEY AUTOINCREMENT, amount REAL, note TEXT, dateTime TEXT, createdMs INTEGER DEFAULT 0)")
               }
-              override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+              override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+                  db.execSQL("CREATE TABLE IF NOT EXISTS payments(id INTEGER PRIMARY KEY AUTOINCREMENT, amount REAL, note TEXT, dateTime TEXT, createdMs INTEGER DEFAULT 0)")
+                  try { db.execSQL("ALTER TABLE items ADD COLUMN createdMs INTEGER DEFAULT 0") } catch (_: Exception) {}
+                  try { db.execSQL("ALTER TABLE payments ADD COLUMN createdMs INTEGER DEFAULT 0") } catch (_: Exception) {}
+              }
               fun all(): List<Furniture> {
                   val out = mutableListOf<Furniture>()
-                  readableDatabase.rawQuery("SELECT * FROM items ORDER BY id DESC", null).use { c ->
+                  readableDatabase.rawQuery("SELECT id, model, size, amount, dateTime, photo, createdMs FROM items ORDER BY id DESC", null).use { c ->
                       while (c.moveToNext()) out.add(Furniture(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "",
-                          c.getDouble(3), c.getString(4) ?: "", c.getString(5) ?: ""))
+                          c.getDouble(3), c.getString(4) ?: "", c.getString(5) ?: "", c.getLong(6)))
                   }
                   return out
               }
-              fun save(id: Long?, model: String, size: String, amount: Double, date: String, photo: String) {
+              fun save(id: Long?, model: String, size: String, amount: Double, date: String, photo: String, ms: Long) {
                   val v = ContentValues().apply {
-                      put("model", model); put("size", size); put("amount", amount); put("dateTime", date); put("photo", photo)
+                      put("model", model); put("size", size); put("amount", amount)
+                      put("dateTime", date); put("photo", photo); put("createdMs", ms)
                   }
                   if (id == null) writableDatabase.insert("items", null, v)
                   else writableDatabase.update("items", v, "id=?", arrayOf(id.toString()))
               }
               fun delete(id: Long) { writableDatabase.delete("items", "id=?", arrayOf(id.toString())) }
-              fun clear() { writableDatabase.delete("items", null, null) }
+
+              fun allPayments(): List<Payment> {
+                  val out = mutableListOf<Payment>()
+                  readableDatabase.rawQuery("SELECT id, amount, note, dateTime, createdMs FROM payments ORDER BY id DESC", null).use { c ->
+                      while (c.moveToNext()) out.add(Payment(c.getLong(0), c.getDouble(1), c.getString(2) ?: "", c.getString(3) ?: "", c.getLong(4)))
+                  }
+                  return out
+              }
+              fun savePayment(id: Long?, amount: Double, note: String, date: String, ms: Long) {
+                  val v = ContentValues().apply {
+                      put("amount", amount); put("note", note); put("dateTime", date); put("createdMs", ms)
+                  }
+                  if (id == null) writableDatabase.insert("payments", null, v)
+                  else writableDatabase.update("payments", v, "id=?", arrayOf(id.toString()))
+              }
+              fun deletePayment(id: Long) { writableDatabase.delete("payments", "id=?", arrayOf(id.toString())) }
+              fun clearAll() {
+                  writableDatabase.delete("items", null, null)
+                  writableDatabase.delete("payments", null, null)
+              }
           }
 
           class MainActivity : ComponentActivity() {
@@ -131,6 +162,11 @@ jobs:
               private var previewImg: ImageView? = null
               private var photoStatus: TextView? = null
               private var searchText = ""
+              private var currentTab = 0
+
+              private var filterByDate = false
+              private var fromMs = 0L
+              private var toMs = 0L
 
               private val greenDark = 0xFF0B4628.toInt()
               private val greenBtn = 0xFF0D6832.toInt()
@@ -144,7 +180,7 @@ jobs:
               private fun isLockEnabled() = prefs().getBoolean("screen_lock", true)
 
               private val authLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
-                  if (res.resultCode == Activity.RESULT_OK) showHome() else showLockedScreen()
+                  if (res.resultCode == Activity.RESULT_OK) openTab(0) else showLockedScreen()
               }
               private val pickPhoto = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
                   if (uri != null) {
@@ -161,7 +197,7 @@ jobs:
               private val importBackup = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
                   if (uri != null) try {
                       val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
-                      restoreBackup(JSONObject(text)); showHome(); toast("Backup Restored ✓")
+                      restoreBackup(JSONObject(text)); openTab(0); toast("Backup Restored ✓")
                   } catch (e: Exception) { toast("Invalid backup file") }
               }
 
@@ -169,9 +205,19 @@ jobs:
                   super.onCreate(savedInstanceState)
                   window.statusBarColor = greenDark
                   db = Db(this)
+                  initDefaultMonthRange()
                   root = FrameLayout(this).apply { setBackgroundColor(bgColor) }
                   setContentView(root)
                   showSplash()
+              }
+
+              private fun initDefaultMonthRange() {
+                  val c = Calendar.getInstance()
+                  c.set(Calendar.DAY_OF_MONTH, 1); c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0); c.set(Calendar.SECOND, 0)
+                  fromMs = c.timeInMillis
+                  val c2 = Calendar.getInstance()
+                  c2.set(Calendar.HOUR_OF_DAY, 23); c2.set(Calendar.MINUTE, 59); c2.set(Calendar.SECOND, 59)
+                  toMs = c2.timeInMillis
               }
 
               private fun showSplash() {
@@ -200,12 +246,12 @@ jobs:
                       setPadding(0, dp(8), 0, 0)
                   })
                   root.addView(splash)
-                  Handler(Looper.getMainLooper()).postDelayed({ checkAuthAndOpen() }, 1100)
+                  Handler(Looper.getMainLooper()).postDelayed({ checkAuthAndOpen() }, 1000)
               }
 
               @Suppress("DEPRECATION")
               private fun checkAuthAndOpen() {
-                  if (!isLockEnabled()) { showHome(); return }
+                  if (!isLockEnabled()) { openTab(0); return }
                   val km = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
                   if (km.isKeyguardSecure) {
                       val intent = km.createConfirmDeviceCredentialIntent(
@@ -214,7 +260,7 @@ jobs:
                       )
                       if (intent != null) { showLockedScreen(); authLauncher.launch(intent); return }
                   }
-                  showHome()
+                  openTab(0)
               }
 
               private fun showLockedScreen() {
@@ -248,33 +294,90 @@ jobs:
                   if (stroke != 0) setStroke(dp(1), stroke)
               }
 
-              private fun topBar(title: String, leftText: String, onLeft: () -> Unit, rightText: String = "", onRight: (() -> Unit)? = null): LinearLayout {
+              private fun topBar(title: String, rightText: String = "", onRight: (() -> Unit)? = null): LinearLayout {
                   return LinearLayout(this).apply {
                       orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-                      setBackgroundColor(greenDark); setPadding(dp(14), dp(14), dp(14), dp(14))
-                      addView(TextView(context).apply {
-                          text = leftText; textSize = 22f; setTextColor(0xFFFFFFFF.toInt())
-                          setPadding(dp(8), dp(4), dp(12), dp(4)); setOnClickListener { onLeft() }
-                      })
+                      setBackgroundColor(greenDark); setPadding(dp(16), dp(14), dp(16), dp(14))
                       addView(TextView(context).apply {
                           text = title; textSize = 20f; setTypeface(null, Typeface.BOLD)
-                          setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER
+                          setTextColor(0xFFFFFFFF.toInt())
                       }, LinearLayout.LayoutParams(0, -2, 1f))
                       if (rightText.isNotEmpty() && onRight != null) {
                           addView(TextView(context).apply {
                               text = rightText; textSize = 20f; setTextColor(0xFFFFFFFF.toInt())
-                              setPadding(dp(12), dp(4), dp(8), dp(4)); setOnClickListener { onRight() }
+                              setPadding(dp(12), dp(4), dp(4), dp(4)); setOnClickListener { onRight() }
                           })
-                      } else {
-                          addView(View(context), LinearLayout.LayoutParams(dp(36), dp(1)))
                       }
                   }
               }
 
-              private fun showHome() {
+              private fun bottomBar(): LinearLayout {
+                  val bar = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                      setBackgroundColor(0xFFFFFFFF.toInt()); elevation = dp(8).toFloat()
+                      setPadding(0, dp(8), 0, dp(8))
+                  }
+                  fun tab(icon: String, label: String, active: Boolean, onClick: () -> Unit) {
+                      val item = LinearLayout(this).apply {
+                          orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+                          setOnClickListener { onClick() }
+                      }
+                      item.addView(TextView(this).apply { text = icon; textSize = 20f; gravity = Gravity.CENTER })
+                      item.addView(TextView(this).apply {
+                          text = label; textSize = 11f; gravity = Gravity.CENTER
+                          setTypeface(null, if (active) Typeface.BOLD else Typeface.NORMAL)
+                          setTextColor(if (active) greenBtn else textMuted)
+                      })
+                      bar.addView(item, LinearLayout.LayoutParams(0, -2, 1f))
+                  }
+                  tab("🏠", "Home", currentTab == 0) { openTab(0) }
+                  tab("🔍", "Search", currentTab == 1) { openTab(1) }
+                  val plusBtn = TextView(this).apply {
+                      text = "+"; textSize = 22f; setTypeface(null, Typeface.BOLD); setTextColor(0xFFFFFFFF.toInt())
+                      gravity = Gravity.CENTER; background = roundBg(greenBtn, 16)
+                      setPadding(dp(14), dp(4), dp(14), dp(4)); setOnClickListener { showForm(null) }
+                  }
+                  val plusWrap = FrameLayout(this).apply { addView(plusBtn, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER)) }
+                  bar.addView(plusWrap, LinearLayout.LayoutParams(0, -2, 1f))
+                  tab("💰", "Hisab", currentTab == 2) { openTab(2) }
+                  tab("⚙️", "Profile", currentTab == 3) { openTab(3) }
+                  return bar
+              }
+
+              private fun openTab(tab: Int) {
+                  currentTab = tab
+                  when (tab) {
+                      0 -> showHome()
+                      1 -> showSearchTab()
+                      2 -> showHisabDashboard()
+                      3 -> showSettings()
+                  }
+              }
+
+              private fun wrapWithBottomBar(page: LinearLayout) {
+                  val divider = View(this).apply { setBackgroundColor(0xFFDCE7E1.toInt()) }
+                  page.addView(divider, LinearLayout.LayoutParams(-1, dp(1)))
+                  page.addView(bottomBar())
                   root.removeAllViews()
+                  root.addView(page)
+              }
+
+              private fun startNewHisab() {
+                  AlertDialog.Builder(this)
+                      .setTitle("नया हिसाब चालू करें?")
+                      .setMessage("क्या आप अभी के सारे फर्नीचर और पेमेंट रिकॉर्ड साफ करके ₹0 से नया हिसाब शुरू करना चाहते हैं?")
+                      .setNeutralButton("पहले Backup सेव करें") { _, _ -> exportBackup.launch("FurnitureHisabBackup.json") }
+                      .setNegativeButton("Cancel", null)
+                      .setPositiveButton("हाँ, नया हिसाब चालू करें") { _, _ ->
+                          db.clearAll()
+                          openTab(currentTab)
+                          toast("नया हिसाब शुरू हो गया ✓")
+                      }.show()
+              }
+
+              private fun showHome() {
                   val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
-                  page.addView(topBar("Furniture Hisab", "☰", { showSettings() }, "☁", { showBackup() }))
+                  page.addView(topBar("Furniture Hisab", "☁", { showBackup() }))
 
                   val scroll = ScrollView(this)
                   val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(16), dp(16), dp(24)) }
@@ -287,17 +390,17 @@ jobs:
                       elevation = dp(4).toFloat(); setPadding(dp(18), dp(18), dp(18), dp(18))
                   }
                   val sumLeft = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                  sumLeft.addView(TextView(this).apply { text = "Total Amount"; textSize = 15f; setTextColor(textMuted) })
+                  sumLeft.addView(TextView(this).apply { text = "Total Kaam (All Entries)"; textSize = 14f; setTextColor(textMuted) })
                   sumLeft.addView(TextView(this).apply {
-                      text = "₹ ${money(total)}"; textSize = 28f; setTypeface(null, Typeface.BOLD); setTextColor(textDark)
+                      text = "₹ ${money(total)}"; textSize = 27f; setTypeface(null, Typeface.BOLD); setTextColor(textDark)
                       setPadding(0, dp(4), 0, dp(6))
                   })
                   sumLeft.addView(TextView(this).apply {
-                      text = "📊 Total Records: ${records.size}"; textSize = 14f; setTypeface(null, Typeface.BOLD); setTextColor(greenDark)
+                      text = "📊 Total Furniture: ${records.size}"; textSize = 14f; setTypeface(null, Typeface.BOLD); setTextColor(greenDark)
                   })
                   summaryCard.addView(sumLeft, LinearLayout.LayoutParams(0, -2, 1f))
                   summaryCard.addView(TextView(this).apply {
-                      text = "📈"; textSize = 40f; gravity = Gravity.CENTER
+                      text = "📈"; textSize = 38f; gravity = Gravity.CENTER
                       background = roundBg(greenLight, 14); setPadding(dp(14), dp(10), dp(14), dp(10))
                   })
                   body.addView(summaryCard, lp(-1, -2, dp(14)))
@@ -311,31 +414,241 @@ jobs:
                   }
                   body.addView(addBtn, lp(-1, -2, dp(18)))
 
-                  val secRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-                  secRow.addView(TextView(this).apply {
-                      text = "Recent Records"; textSize = 17f; setTypeface(null, Typeface.BOLD); setTextColor(textDark)
-                  }, LinearLayout.LayoutParams(0, -2, 1f))
-                  secRow.addView(TextView(this).apply {
-                      text = "View All →"; textSize = 14f; setTypeface(null, Typeface.BOLD); setTextColor(greenBtn)
-                      setOnClickListener { searchText = ""; showAllRecords() }
-                  })
-                  body.addView(secRow, lp(-1, -2, dp(10)))
+                  body.addView(TextView(this).apply {
+                      text = "Furniture Photo Series (${records.size})"; textSize = 17f; setTypeface(null, Typeface.BOLD); setTextColor(textDark)
+                  }, lp(-1, -2, dp(10)))
 
                   if (records.isEmpty()) {
                       body.addView(TextView(this).apply {
-                          text = "Abhi koi record nahi hai.\n'+ Add New Furniture' par tap karein."; gravity = Gravity.CENTER
+                          text = "Abhi koi entry nahi hai.\n'+ Add New Furniture' par tap karein."; gravity = Gravity.CENTER
                           textSize = 15f; setTextColor(textMuted); setPadding(dp(16), dp(30), dp(16), dp(30))
                           background = roundBg(0xFFFFFFFF.toInt(), 14)
-                      }, lp(-1, -2, dp(10)))
+                      })
                   } else {
-                      records.take(10).forEach { item -> body.addView(recordCard(item), lp(-1, -2, dp(10))) }
+                      records.forEachIndexed { idx, item -> body.addView(recordCard(item, records.size - idx), lp(-1, -2, dp(10))) }
                   }
                   scroll.addView(body)
                   page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-                  root.addView(page)
+                  wrapWithBottomBar(page)
               }
 
-              private fun recordCard(item: Furniture): LinearLayout {
+              private fun showSearchTab() {
+                  val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
+                  page.addView(topBar("Search Furniture"))
+                  val searchBox = EditText(this).apply {
+                      hint = "🔍 Search Model, Size, Date or Amount..."; setText(searchText)
+                      background = roundBg(0xFFFFFFFF.toInt(), 12, 0xFFD0DDD6.toInt())
+                      setPadding(dp(14), dp(12), dp(14), dp(12))
+                  }
+                  page.addView(searchBox, LinearLayout.LayoutParams(-1, -2).apply { setMargins(dp(14), dp(12), dp(14), dp(6)) })
+
+                  val scroll = ScrollView(this)
+                  val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(8), dp(14), dp(20)) }
+                  fun renderList(q: String) {
+                      list.removeAllViews()
+                      val matched = db.all().filter {
+                          q.isBlank() || it.model.contains(q, true) || it.size.contains(q, true) || it.amount.toString().contains(q) || it.dateTime.contains(q, true)
+                      }
+                      matched.forEachIndexed { idx, it -> list.addView(recordCard(it, matched.size - idx), lp(-1, -2, dp(10))) }
+                  }
+                  renderList(searchText)
+                  searchBox.addTextChangedListener(object : TextWatcher {
+                      override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                      override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) { searchText = s.toString(); renderList(searchText) }
+                      override fun afterTextChanged(s: Editable?) {}
+                  })
+                  scroll.addView(list)
+                  page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+                  wrapWithBottomBar(page)
+              }
+
+              private fun showHisabDashboard() {
+                  val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
+                  page.addView(topBar("हिसाब (Hisab Dashboard)", "🔄", { startNewHisab() }))
+
+                  val scroll = ScrollView(this)
+                  val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(14), dp(16), dp(24)) }
+
+                  val fmt = SimpleDateFormat("dd MMM yyyy", Locale.getDefault())
+                  val modeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  val allBtn = TextView(this).apply {
+                      text = "All Time (कुल)"; gravity = Gravity.CENTER; textSize = 13f; setTypeface(null, Typeface.BOLD)
+                      setTextColor(if (!filterByDate) 0xFFFFFFFF.toInt() else greenDark)
+                      background = roundBg(if (!filterByDate) greenBtn else 0xFFFFFFFF.toInt(), 20, greenBtn)
+                      setPadding(dp(10), dp(9), dp(10), dp(9))
+                      setOnClickListener { filterByDate = false; showHisabDashboard() }
+                  }
+                  val rangeBtn = TextView(this).apply {
+                      text = "📅 तारीख से तारीख (1–30)"; gravity = Gravity.CENTER; textSize = 13f; setTypeface(null, Typeface.BOLD)
+                      setTextColor(if (filterByDate) 0xFFFFFFFF.toInt() else greenDark)
+                      background = roundBg(if (filterByDate) greenBtn else 0xFFFFFFFF.toInt(), 20, greenBtn)
+                      setPadding(dp(10), dp(9), dp(10), dp(9))
+                      setOnClickListener { filterByDate = true; showHisabDashboard() }
+                  }
+                  modeRow.addView(allBtn, LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(8) })
+                  modeRow.addView(rangeBtn, LinearLayout.LayoutParams(0, -2, 1f))
+                  body.addView(modeRow, lp(-1, -2, dp(10)))
+
+                  if (filterByDate) {
+                      val dateRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                      fun pickDate(isFrom: Boolean) {
+                          val cal = Calendar.getInstance().apply { timeInMillis = if (isFrom) fromMs else toMs }
+                          DatePickerDialog(this, { _, y, m, d ->
+                              val c = Calendar.getInstance()
+                              if (isFrom) {
+                                  c.set(y, m, d, 0, 0, 0); fromMs = c.timeInMillis
+                              } else {
+                                  c.set(y, m, d, 23, 59, 59); toMs = c.timeInMillis
+                              }
+                              showHisabDashboard()
+                          }, cal.get(Calendar.YEAR), cal.get(Calendar.MONTH), cal.get(Calendar.DAY_OF_MONTH)).show()
+                      }
+                      dateRow.addView(TextView(this).apply {
+                          text = "From: ${fmt.format(Date(fromMs))}"; gravity = Gravity.CENTER; textSize = 13f; setTextColor(textDark)
+                          background = roundBg(0xFFFFFFFF.toInt(), 12, 0xFFD0DDD6.toInt()); setPadding(dp(10), dp(10), dp(10), dp(10))
+                          setOnClickListener { pickDate(true) }
+                      }, LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(8) })
+                      dateRow.addView(TextView(this).apply {
+                          text = "To: ${fmt.format(Date(toMs))}"; gravity = Gravity.CENTER; textSize = 13f; setTextColor(textDark)
+                          background = roundBg(0xFFFFFFFF.toInt(), 12, 0xFFD0DDD6.toInt()); setPadding(dp(10), dp(10), dp(10), dp(10))
+                          setOnClickListener { pickDate(false) }
+                      }, LinearLayout.LayoutParams(0, -2, 1f))
+                      body.addView(dateRow, lp(-1, -2, dp(12)))
+                  }
+
+                  val allItems = db.all()
+                  val allPays = db.allPayments()
+                  val items = if (!filterByDate) allItems else allItems.filter { it.createdMs == 0L || it.createdMs in fromMs..toMs }
+                  val payments = if (!filterByDate) allPays else allPays.filter { it.createdMs == 0L || it.createdMs in fromMs..toMs }
+
+                  val totalBill = items.sumOf { it.amount }
+                  val totalReceived = payments.sumOf { it.amount }
+                  val balance = totalBill - totalReceived
+
+                  val card = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      background = roundBg(0xFFFFFFFF.toInt(), 18, 0xFFDCE7E1.toInt())
+                      elevation = dp(4).toFloat(); setPadding(dp(18), dp(16), dp(18), dp(16))
+                  }
+                  fun statRow(label: String, value: String, valueColor: Int, big: Boolean = false) {
+                      val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                      r.addView(TextView(this).apply { text = label; textSize = if (big) 16f else 14f; setTextColor(textMuted) }, LinearLayout.LayoutParams(0, -2, 1f))
+                      r.addView(TextView(this).apply {
+                          text = value; textSize = if (big) 22f else 17f; setTypeface(null, Typeface.BOLD); setTextColor(valueColor)
+                      })
+                      card.addView(r, lp(-1, -2, dp(8)))
+                  }
+                  statRow("Kaam (Items Done)", "${items.size} Items", textDark)
+                  statRow("Total Kaam (Bill)", "₹ ${money(totalBill)}", textDark)
+                  statRow("Seth ne Diya (Mila)", "₹ ${money(totalReceived)}", greenBtn)
+                  card.addView(View(this).apply { setBackgroundColor(0xFFE0EAE4.toInt()) }, lp(-1, dp(1), dp(10)))
+                  statRow("Baki Lena Hai (Balance)", "₹ ${money(balance)}", if (balance > 0) 0xFFB71C1C.toInt() else greenDark, true)
+                  card.addView(TextView(this).apply {
+                      text = "🧾 Total Transactions: ${payments.size}"
+                      textSize = 13f; setTypeface(null, Typeface.BOLD); setTextColor(greenDark)
+                      background = roundBg(greenLight, 10); setPadding(dp(12), dp(8), dp(12), dp(8))
+                  })
+                  body.addView(card, lp(-1, -2, dp(14)))
+
+                  val payBtn = TextView(this).apply {
+                      text = "+  सेठ से पैसा मिला (Add Payment)"; textSize = 16f; setTypeface(null, Typeface.BOLD)
+                      setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER
+                      background = roundBg(greenBtn, 26); elevation = dp(3).toFloat()
+                      setPadding(dp(16), dp(14), dp(16), dp(14))
+                      setOnClickListener { showPaymentDialog(null) }
+                  }
+                  body.addView(payBtn, lp(-1, -2, dp(16)))
+
+                  body.addView(TextView(this).apply {
+                      text = "Transaction History (${payments.size})"; textSize = 16f; setTypeface(null, Typeface.BOLD); setTextColor(textDark)
+                  }, lp(-1, -2, dp(10)))
+
+                  if (payments.isEmpty()) {
+                      body.addView(TextView(this).apply {
+                          text = "Is period me koi payment transaction nahi hai."; gravity = Gravity.CENTER
+                          textSize = 15f; setTextColor(textMuted); setPadding(dp(16), dp(26), dp(16), dp(26))
+                          background = roundBg(0xFFFFFFFF.toInt(), 14)
+                      })
+                  } else {
+                      payments.forEachIndexed { idx, p ->
+                          val tCard = LinearLayout(this).apply {
+                              orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                              background = roundBg(0xFFFFFFFF.toInt(), 14, 0xFFE2EBE6.toInt())
+                              elevation = dp(2).toFloat(); setPadding(dp(14), dp(12), dp(10), dp(12))
+                          }
+                          tCard.addView(TextView(this).apply {
+                              text = "💵"; textSize = 24f; gravity = Gravity.CENTER
+                              background = roundBg(greenLight, 12); setPadding(dp(12), dp(10), dp(12), dp(10))
+                          }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(12) })
+
+                          val tInfo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                          tInfo.addView(TextView(this).apply {
+                              text = "#${payments.size - idx}   ₹ ${money(p.amount)}"; textSize = 17f
+                              setTypeface(null, Typeface.BOLD); setTextColor(greenBtn)
+                          })
+                          if (p.note.isNotBlank()) {
+                              tInfo.addView(TextView(this).apply { text = p.note; textSize = 14f; setTextColor(textDark) })
+                          }
+                          tInfo.addView(TextView(this).apply { text = "📅 ${p.dateTime}"; textSize = 11f; setTextColor(textMuted) })
+                          tCard.addView(tInfo, LinearLayout.LayoutParams(0, -2, 1f))
+
+                          tCard.addView(TextView(this).apply {
+                              text = "⋮"; textSize = 22f; setTypeface(null, Typeface.BOLD); setTextColor(textMuted)
+                              setPadding(dp(10), dp(6), dp(6), dp(6))
+                              setOnClickListener { v ->
+                                  PopupMenu(context, v).apply {
+                                      menu.add("Edit"); menu.add("Delete")
+                                      setOnMenuItemClickListener { m ->
+                                          if (m.title == "Edit") showPaymentDialog(p)
+                                          else AlertDialog.Builder(context).setMessage("Delete ₹ ${money(p.amount)} transaction?")
+                                              .setNegativeButton("Cancel", null)
+                                              .setPositiveButton("Delete") { _, _ -> db.deletePayment(p.id); showHisabDashboard() }.show()
+                                          true
+                                      }
+                                  }.show()
+                              }
+                          })
+                          body.addView(tCard, lp(-1, -2, dp(10)))
+                      }
+                  }
+                  scroll.addView(body)
+                  page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+                  wrapWithBottomBar(page)
+              }
+
+              private fun showPaymentDialog(p: Payment?) {
+                  val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(12), dp(20), dp(8)) }
+                  val amt = EditText(this).apply {
+                      hint = "Amount (₹)"; setText(if (p != null) p.amount.toString() else "")
+                      inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+                  }
+                  val note = EditText(this).apply {
+                      hint = "Note (e.g. Seth ne diya / Advance / Cash)"; setText(p?.note ?: "Seth Payment")
+                  }
+                  val date = EditText(this).apply {
+                      hint = "Date & Time"
+                      setText(p?.dateTime ?: SimpleDateFormat("dd MMM yyyy, EEE • hh:mm a", Locale.getDefault()).format(Date()))
+                  }
+                  box.addView(amt, lp(-1, -2, dp(8)))
+                  box.addView(note, lp(-1, -2, dp(8)))
+                  box.addView(date, lp(-1, -2, dp(4)))
+
+                  AlertDialog.Builder(this)
+                      .setTitle(if (p == null) "सेठ से पैसा मिला" else "Edit Payment")
+                      .setView(box)
+                      .setNegativeButton("Cancel", null)
+                      .setPositiveButton("Save") { _, _ ->
+                          val a = amt.text.toString().trim().toDoubleOrNull()
+                          if (a == null || a <= 0) toast("Sahi amount bhariye")
+                          else {
+                              db.savePayment(p?.id, a, note.text.toString().trim(), date.text.toString().trim(), p?.createdMs ?: System.currentTimeMillis())
+                              showHisabDashboard()
+                              toast("Payment Saved ✓")
+                          }
+                      }.show()
+              }
+
+              private fun recordCard(item: Furniture, serialNo: Int): LinearLayout {
                   return LinearLayout(this).apply {
                       orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
                       background = roundBg(0xFFFFFFFF.toInt(), 14, 0xFFE2EBE6.toInt())
@@ -351,7 +664,7 @@ jobs:
                       addView(thumb, LinearLayout.LayoutParams(dp(74), dp(68)).apply { rightMargin = dp(12) })
 
                       val info = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-                      info.addView(TextView(context).apply { text = item.model; textSize = 16f; setTypeface(null, Typeface.BOLD); setTextColor(textDark) })
+                      info.addView(TextView(context).apply { text = "#$serialNo  ${item.model}"; textSize = 16f; setTypeface(null, Typeface.BOLD); setTextColor(textDark) })
                       if (item.size.isNotBlank()) {
                           info.addView(TextView(context).apply { text = "Size: ${item.size}"; textSize = 13f; setTextColor(textMuted) })
                       }
@@ -372,43 +685,13 @@ jobs:
                                       if (m.title == "Edit") showForm(item)
                                       else AlertDialog.Builder(context).setMessage("Delete '${item.model}'?")
                                           .setNegativeButton("Cancel", null)
-                                          .setPositiveButton("Delete") { _, _ -> db.delete(item.id); showHome() }.show()
+                                          .setPositiveButton("Delete") { _, _ -> db.delete(item.id); openTab(currentTab) }.show()
                                       true
                                   }
                               }.show()
                           }
                       })
                   }
-              }
-
-              private fun showAllRecords() {
-                  root.removeAllViews()
-                  val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
-                  page.addView(topBar("All Records", "←", { showHome() }))
-                  val searchBox = EditText(this).apply {
-                      hint = "🔍 Search Model, Size or Amount..."; setText(searchText)
-                      background = roundBg(0xFFFFFFFF.toInt(), 12, 0xFFD0DDD6.toInt())
-                      setPadding(dp(14), dp(12), dp(14), dp(12))
-                  }
-                  page.addView(searchBox, LinearLayout.LayoutParams(-1, -2).apply { setMargins(dp(14), dp(12), dp(14), dp(6)) })
-
-                  val scroll = ScrollView(this)
-                  val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(8), dp(14), dp(20)) }
-                  fun renderList(q: String) {
-                      list.removeAllViews()
-                      db.all().filter {
-                          q.isBlank() || it.model.contains(q, true) || it.size.contains(q, true) || it.amount.toString().contains(q)
-                      }.forEach { list.addView(recordCard(it), lp(-1, -2, dp(10))) }
-                  }
-                  renderList(searchText)
-                  searchBox.addTextChangedListener(object : TextWatcher {
-                      override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                      override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) { searchText = s.toString(); renderList(searchText) }
-                      override fun afterTextChanged(s: Editable?) {}
-                  })
-                  scroll.addView(list)
-                  page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-                  root.addView(page)
               }
 
               private fun showForm(item: Furniture?) {
@@ -464,8 +747,8 @@ jobs:
                       val a = amount.text.toString().trim().toDoubleOrNull()
                       if (model.text.isBlank() || a == null) toast("Model No. aur valid Amount bhariye")
                       else {
-                          db.save(item?.id, model.text.toString().trim(), size.text.toString().trim(), a, date.text.toString().trim(), chosenPhoto)
-                          showHome(); toast("Record Saved ✓")
+                          db.save(item?.id, model.text.toString().trim(), size.text.toString().trim(), a, date.text.toString().trim(), chosenPhoto, item?.createdMs ?: System.currentTimeMillis())
+                          openTab(0); toast("Record Saved ✓")
                       }
                   }
                   val saveBtn = TextView(this).apply {
@@ -476,7 +759,24 @@ jobs:
                   }
                   box.addView(saveBtn, lp(-1, -2, dp(10)))
                   scroll.addView(box)
-                  page.addView(topBar(if (item == null) "Add Furniture" else "Edit Furniture", "←", { showHome() }, "💾", doSave))
+
+                  val bar = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                      setBackgroundColor(greenDark); setPadding(dp(14), dp(14), dp(14), dp(14))
+                      addView(TextView(context).apply {
+                          text = "←"; textSize = 22f; setTextColor(0xFFFFFFFF.toInt())
+                          setPadding(dp(8), dp(4), dp(12), dp(4)); setOnClickListener { openTab(currentTab) }
+                      })
+                      addView(TextView(context).apply {
+                          text = if (item == null) "Add Furniture" else "Edit Furniture"; textSize = 20f
+                          setTypeface(null, Typeface.BOLD); setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER
+                      }, LinearLayout.LayoutParams(0, -2, 1f))
+                      addView(TextView(context).apply {
+                          text = "💾"; textSize = 20f; setTextColor(0xFFFFFFFF.toInt())
+                          setPadding(dp(12), dp(4), dp(8), dp(4)); setOnClickListener { doSave() }
+                      })
+                  }
+                  page.addView(bar)
                   page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
                   root.addView(page)
               }
@@ -484,7 +784,19 @@ jobs:
               private fun showBackup() {
                   root.removeAllViews()
                   val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
-                  page.addView(topBar("Backup & Restore", "←", { showHome() }))
+                  val bar = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                      setBackgroundColor(greenDark); setPadding(dp(14), dp(14), dp(14), dp(14))
+                      addView(TextView(context).apply {
+                          text = "←"; textSize = 22f; setTextColor(0xFFFFFFFF.toInt())
+                          setPadding(dp(8), dp(4), dp(12), dp(4)); setOnClickListener { openTab(currentTab) }
+                      })
+                      addView(TextView(context).apply {
+                          text = "Backup & Restore"; textSize = 20f; setTypeface(null, Typeface.BOLD)
+                          setTextColor(0xFFFFFFFF.toInt())
+                      })
+                  }
+                  page.addView(bar)
                   val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(18), dp(20), dp(18), dp(20)) }
                   body.addView(TextView(this).apply { text = "☁️"; textSize = 54f; gravity = Gravity.CENTER })
                   body.addView(TextView(this).apply { text = "Keep your data safe"; textSize = 16f; setTypeface(null, Typeface.BOLD); gravity = Gravity.CENTER; setTextColor(textDark) }, lp(-1, -2, dp(18)))
@@ -499,17 +811,17 @@ jobs:
                       body.addView(c, lp(-1, -2, dp(12)))
                   }
                   bCard("✓ Automatic Backup (Android)", "Data is backed up automatically on device", greenLight, 0xFF81C784.toInt()) { toast("Auto Backup On ✓") }
-                  bCard("💾 Manual Backup (Save File)", "Save all records & photos to a file", 0xFFE3F2FD.toInt(), 0xFF90CAF9.toInt()) { exportBackup.launch("FurnitureHisabBackup.json") }
+                  bCard("💾 Manual Backup (Save File)", "Save all furniture, photos & hisab transactions", 0xFFE3F2FD.toInt(), 0xFF90CAF9.toInt()) { exportBackup.launch("FurnitureHisabBackup.json") }
                   bCard("📂 Restore Data", "Restore from your backup JSON file", 0xFFFFFFFF.toInt(), 0xFFD0DDD6.toInt()) { importBackup.launch(arrayOf("application/json", "text/*")) }
                   page.addView(body)
                   root.addView(page)
               }
 
               private fun showSettings() {
-                  root.removeAllViews()
                   val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
-                  page.addView(topBar("Settings", "←", { showHome() }))
-                  val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(16), dp(16), dp(16)) }
+                  page.addView(topBar("Profile & Settings"))
+                  val scroll = ScrollView(this)
+                  val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(16), dp(16), dp(20)) }
                   fun row(title: String, right: String, onClick: () -> Unit) {
                       val r = LinearLayout(this).apply {
                           orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
@@ -525,35 +837,39 @@ jobs:
                       toast(if (isLockEnabled()) "App Lock ON ✓" else "App Lock OFF")
                       showSettings()
                   }
+                  row("🔄 नया हिसाब चालू करें", "Reset >") { startNewHisab() }
                   row("☁️ Backup Settings", "Auto Backup On >") { showBackup() }
                   row("📂 Restore Data", ">") { importBackup.launch(arrayOf("application/json", "text/*")) }
-                  row("ℹ️ About App", "Furniture Hisab v1.0 >") { toast("Furniture Hisab v1.0 - Green & White Edition") }
-                  row("⭐ Rate Us", "Give 5 Stars >") { toast("Thank you for 5 Stars! ⭐") }
+                  row("ℹ️ About App", "Furniture Hisab v2.0 >") { toast("Furniture Hisab v2.0 - Green & White Edition") }
                   row("🔗 Share App", ">") {
                       startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
                           type = "text/plain"; putExtra(Intent.EXTRA_TEXT, "Furniture Hisab App - Apne Furniture ka Sahi Hisab, Hamesha Saath!")
                       }, "Share Furniture Hisab"))
                   }
-                  row("✉️ Contact Us", ">") { toast("Furniture Hisab Support") }
-                  page.addView(body)
-                  root.addView(page)
+                  scroll.addView(body)
+                  page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+                  wrapWithBottomBar(page)
               }
 
               private fun makeBackup(): JSONObject {
                   val arr = JSONArray()
                   db.all().forEach { f ->
                       val obj = JSONObject().put("id", f.id).put("model", f.model).put("size", f.size)
-                          .put("amount", f.amount).put("dateTime", f.dateTime)
+                          .put("amount", f.amount).put("dateTime", f.dateTime).put("createdMs", f.createdMs)
                       if (f.photo.isNotBlank() && File(f.photo).exists()) {
                           obj.put("photoName", File(f.photo).name).put("photoBase64", Base64.encodeToString(File(f.photo).readBytes(), Base64.NO_WRAP))
                       }
                       arr.put(obj)
                   }
-                  return JSONObject().put("app", "FurnitureHisab").put("version", 1).put("items", arr)
+                  val pArr = JSONArray()
+                  db.allPayments().forEach { p ->
+                      pArr.put(JSONObject().put("id", p.id).put("amount", p.amount).put("note", p.note).put("dateTime", p.dateTime).put("createdMs", p.createdMs))
+                  }
+                  return JSONObject().put("app", "FurnitureHisab").put("version", 4).put("items", arr).put("payments", pArr)
               }
               private fun restoreBackup(data: JSONObject) {
                   val arr = data.getJSONArray("items")
-                  db.clear()
+                  db.clearAll()
                   for (i in 0 until arr.length()) {
                       val o = arr.getJSONObject(i)
                       var photo = ""
@@ -563,7 +879,14 @@ jobs:
                           file.writeBytes(Base64.decode(o.getString("photoBase64"), Base64.DEFAULT))
                           photo = file.absolutePath
                       }
-                      db.save(null, o.optString("model"), o.optString("size"), o.optDouble("amount"), o.optString("dateTime"), photo)
+                      db.save(null, o.optString("model"), o.optString("size"), o.optDouble("amount"), o.optString("dateTime"), photo, o.optLong("createdMs", System.currentTimeMillis()))
+                  }
+                  if (data.has("payments")) {
+                      val pArr = data.getJSONArray("payments")
+                      for (i in 0 until pArr.length()) {
+                          val o = pArr.getJSONObject(i)
+                          db.savePayment(null, o.optDouble("amount"), o.optString("note"), o.optString("dateTime"), o.optLong("createdMs", System.currentTimeMillis()))
+                      }
                   }
               }
               private fun money(v: Double) = String.format(Locale("en", "IN"), "%,.0f", v)
