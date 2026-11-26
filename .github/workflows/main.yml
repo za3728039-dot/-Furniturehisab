@@ -25,40 +25,65 @@ jobs:
             [ -f "$z" ] && unzip -o "$z" -d extracted
           done
 
-      - name: Upgrade App to Instagram-Style Bottom Bar + Date-wise Hisab
+      - name: Fix System Bar Insets + Generate Real PNG Green Furniture Icon
         run: |
           PROJECT_DIR=$(dirname "$(find . -maxdepth 5 \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) | head -n 1)")
           APP_DIR="$PROJECT_DIR/app"
           find "$APP_DIR/src/main/res" -name "ic_launcher*" -delete
-          mkdir -p "$APP_DIR/src/main/res/drawable" "$APP_DIR/src/main/res/mipmap-anydpi-v26"
-          cat << 'EOF' > "$APP_DIR/src/main/res/drawable/ic_launcher_bg.xml"
-          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
-            <path android:fillColor="#0B4628" android:pathData="M0,0 h108 v108 h-108 z"/>
-          </vector>
-          EOF
-          cat << 'EOF' > "$APP_DIR/src/main/res/drawable/ic_launcher_fg.xml"
-          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
-            <path android:fillColor="#FFFFFF" android:pathData="M54,23 L24,46 L29,46 L29,49 L54,30 L79,49 L79,46 L84,46 Z"/>
-            <path android:fillColor="#FFFFFF" android:pathData="M50,36 h8 v8 h-8 z"/>
-            <path android:fillColor="#FFFFFF" android:pathData="M32,55 c0,-3 2,-5 5,-5 h34 c3,0 5,2 5,5 v7 h-44 z"/>
-            <path android:fillColor="#FFFFFF" android:pathData="M28,62 h52 c2,0 4,2 4,4 v9 c0,2 -2,4 -4,4 h-4 v4 h-6 v-4 h-32 v4 h-6 v-4 h-4 c-2,0 -4,-2 -4,-4 v-9 c0,-2 2,-4 4,-4 z"/>
-            <path android:fillColor="#FFD43B" android:pathData="M26,84 Q54,79 82,85 Q54,83 26,84 Z"/>
-          </vector>
-          EOF
-          cat << 'EOF' > "$APP_DIR/src/main/res/mipmap-anydpi-v26/ic_launcher.xml"
-          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-            <background android:drawable="@drawable/ic_launcher_bg"/>
-            <foreground android:drawable="@drawable/ic_launcher_fg"/>
-          </adaptive-icon>
-          EOF
-          cp "$APP_DIR/src/main/res/mipmap-anydpi-v26/ic_launcher.xml" "$APP_DIR/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml"
+          python3 - "$APP_DIR/src/main/res" << 'PYICON'
+          import os, sys, zlib, struct
+          res_dir = sys.argv[1]
+          def write_png(path, size):
+              w = h = size
+              rows = []
+              for y in range(h):
+                  row = bytearray([0])
+                  ny = y / float(h)
+                  for x in range(w):
+                      nx = x / float(w)
+                      r, g, b, a = 11, 70, 40, 255
+                      # White house roof
+                      if 0.18 <= ny <= 0.44 and abs(nx - 0.5) <= (ny - 0.16) * 1.15 and abs(nx - 0.5) >= (ny - 0.22) * 1.15:
+                          r, g, b = 255, 255, 255
+                      # White window
+                      elif 0.31 <= ny <= 0.39 and 0.46 <= nx <= 0.54:
+                          r, g, b = 255, 255, 255
+                      # White sofa back & seat
+                      elif 0.48 <= ny <= 0.60 and 0.26 <= nx <= 0.74:
+                          r, g, b = 255, 255, 255
+                      elif 0.56 <= ny <= 0.72 and 0.22 <= nx <= 0.78:
+                          r, g, b = 255, 255, 255
+                      # Sofa legs
+                      elif 0.72 <= ny <= 0.77 and (0.26 <= nx <= 0.32 or 0.68 <= nx <= 0.74):
+                          r, g, b = 255, 255, 255
+                      # Gold curve
+                      elif 0.80 <= ny <= 0.84 and 0.20 <= nx <= 0.80:
+                          r, g, b = 255, 212, 59
+                      row.extend([r, g, b, a])
+                  rows.append(bytes(row))
+              raw = b"".join(rows)
+              def chunk(tag, data):
+                  return struct.pack("!I", len(data)) + tag + data + struct.pack("!I", zlib.crc32(tag + data) & 0xffffffff)
+              png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack("!IIBBBBB", w, h, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
+              os.makedirs(os.path.dirname(path), exist_ok=True)
+              open(path, "wb").write(png)
+          for folder, sz in [("mipmap-mdpi", 48), ("mipmap-hdpi", 72), ("mipmap-xhdpi", 96), ("mipmap-xxhdpi", 144), ("mipmap-xxxhdpi", 192)]:
+              write_png(os.path.join(res_dir, folder, "ic_launcher.png"), sz)
+              write_png(os.path.join(res_dir, folder, "ic_launcher_round.png"), sz)
+          PYICON
           MANIFEST=$(find "$APP_DIR/src/main" -name "AndroidManifest.xml" | head -n 1)
           python3 - "$MANIFEST" << 'PYM'
           import sys, re
           p = sys.argv[1]
           s = open(p, encoding='utf-8').read()
-          s = re.sub(r'android:icon="[^"]*"', 'android:icon="@mipmap/ic_launcher"', s)
-          s = re.sub(r'android:roundIcon="[^"]*"', 'android:roundIcon="@mipmap/ic_launcher_round"', s)
+          if 'android:icon=' in s:
+              s = re.sub(r'android:icon="[^"]*"', 'android:icon="@mipmap/ic_launcher"', s)
+          else:
+              s = s.replace('<application', '<application android:icon="@mipmap/ic_launcher"')
+          if 'android:roundIcon=' in s:
+              s = re.sub(r'android:roundIcon="[^"]*"', 'android:roundIcon="@mipmap/ic_launcher_round"', s)
+          else:
+              s = s.replace('<application', '<application android:roundIcon="@mipmap/ic_launcher_round"')
           open(p, 'w', encoding='utf-8').write(s)
           PYM
           MAIN_KT=$(find "$APP_DIR/src/main" -name "MainActivity.kt" | head -n 1)
@@ -201,12 +226,20 @@ jobs:
                   } catch (e: Exception) { toast("Invalid backup file") }
               }
 
+              @Suppress("DEPRECATION")
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   window.statusBarColor = greenDark
+                  window.navigationBarColor = 0xFFFFFFFF.toInt()
                   db = Db(this)
                   initDefaultMonthRange()
-                  root = FrameLayout(this).apply { setBackgroundColor(bgColor) }
+                  root = FrameLayout(this).apply {
+                      setBackgroundColor(greenDark)
+                      setOnApplyWindowInsetsListener { v, insets ->
+                          v.setPadding(0, insets.systemWindowInsetTop, 0, insets.systemWindowInsetBottom)
+                          insets
+                      }
+                  }
                   setContentView(root)
                   showSplash()
               }
@@ -315,7 +348,7 @@ jobs:
                   val bar = LinearLayout(this).apply {
                       orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
                       setBackgroundColor(0xFFFFFFFF.toInt()); elevation = dp(8).toFloat()
-                      setPadding(0, dp(8), 0, dp(8))
+                      setPadding(0, dp(10), 0, dp(10))
                   }
                   fun tab(icon: String, label: String, active: Boolean, onClick: () -> Unit) {
                       val item = LinearLayout(this).apply {
@@ -840,7 +873,7 @@ jobs:
                   row("🔄 नया हिसाब चालू करें", "Reset >") { startNewHisab() }
                   row("☁️ Backup Settings", "Auto Backup On >") { showBackup() }
                   row("📂 Restore Data", ">") { importBackup.launch(arrayOf("application/json", "text/*")) }
-                  row("ℹ️ About App", "Furniture Hisab v2.0 >") { toast("Furniture Hisab v2.0 - Green & White Edition") }
+                  row("ℹ️ About App", "Furniture Hisab v2.1 >") { toast("Furniture Hisab v2.1 - Green & White Edition") }
                   row("🔗 Share App", ">") {
                       startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
                           type = "text/plain"; putExtra(Intent.EXTRA_TEXT, "Furniture Hisab App - Apne Furniture ka Sahi Hisab, Hamesha Saath!")
