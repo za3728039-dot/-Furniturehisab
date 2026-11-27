@@ -25,18 +25,12 @@ jobs:
             [ -f "$z" ] && unzip -o "$z" -d extracted
           done
 
-      - name: Fix Adaptive ZFH Icon + Internet Permission + MainActivity
+      - name: Set Unique ZFH Icon + Safe App
         run: |
           PROJECT_DIR=$(dirname "$(find . -maxdepth 5 \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) | head -n 1)")
           APP_DIR="$PROJECT_DIR/app"
           find "$APP_DIR/src/main/res" -name "ic_launcher*" -delete
           python3 -m pip install -q pillow || true
-          mkdir -p "$APP_DIR/src/main/res/drawable-nodpi" "$APP_DIR/src/main/res/drawable" "$APP_DIR/src/main/res/mipmap-anydpi-v26"
-          cat << 'EOF' > "$APP_DIR/src/main/res/drawable/ic_launcher_bg.xml"
-          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
-            <path android:fillColor="#000000" android:pathData="M0,0 h108 v108 h-108 z"/>
-          </vector>
-          EOF
           python3 - "$APP_DIR/src/main/res" << 'PYICON'
           import os, sys, glob
           from PIL import Image
@@ -46,23 +40,11 @@ jobs:
           w, h = im.size
           m = min(w, h)
           im = im.crop(((w - m) // 2, (h - m) // 2, (w + m) // 2, (h + m) // 2))
-          fg = Image.new("RGBA", (432, 432), (0, 0, 0, 0))
-          fg.paste(im.resize((300, 300), Image.LANCZOS), (66, 66))
-          fg.save(os.path.join(res_dir, "drawable-nodpi", "ic_launcher_fg_img.png"))
           for folder, sz in [("mipmap-mdpi", 48), ("mipmap-hdpi", 72), ("mipmap-xhdpi", 96), ("mipmap-xxhdpi", 144), ("mipmap-xxxhdpi", 192)]:
               d = os.path.join(res_dir, folder)
               os.makedirs(d, exist_ok=True)
-              r = im.resize((sz, sz), Image.LANCZOS)
-              r.save(os.path.join(d, "ic_launcher.png"))
-              r.save(os.path.join(d, "ic_launcher_round.png"))
+              im.resize((sz, sz), Image.LANCZOS).save(os.path.join(d, "zfh_icon.png"))
           PYICON
-          cat << 'EOF' > "$APP_DIR/src/main/res/mipmap-anydpi-v26/ic_launcher.xml"
-          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-            <background android:drawable="@drawable/ic_launcher_bg"/>
-            <foreground android:drawable="@drawable/ic_launcher_fg_img"/>
-          </adaptive-icon>
-          EOF
-          cp "$APP_DIR/src/main/res/mipmap-anydpi-v26/ic_launcher.xml" "$APP_DIR/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml"
           MANIFEST=$(find "$APP_DIR/src/main" -name "AndroidManifest.xml" | head -n 1)
           python3 - "$MANIFEST" << 'PYM'
           import sys, re
@@ -70,9 +52,11 @@ jobs:
           s = open(p, encoding='utf-8').read()
           if 'android.permission.INTERNET' not in s:
               s = s.replace('<application', '<uses-permission android:name="android.permission.INTERNET"/>\n    <application', 1)
-          s = re.sub(r'android:icon="[^"]*"', 'android:icon="@mipmap/ic_launcher"', s)
-          s = re.sub(r'android:roundIcon="[^"]*"', 'android:roundIcon="@mipmap/ic_launcher_round"', s)
+          s = re.sub(r'android:icon="[^"]*"', 'android:icon="@mipmap/zfh_icon"', s)
+          s = re.sub(r'android:roundIcon="[^"]*"', 'android:roundIcon="@mipmap/zfh_icon"', s)
           s = re.sub(r'android:label="[^"]*"', 'android:label="ZFH Ledger"', s)
+          if 'android:icon=' not in s:
+              s = s.replace('<application', '<application android:icon="@mipmap/zfh_icon" android:roundIcon="@mipmap/zfh_icon"', 1)
           open(p, 'w', encoding='utf-8').write(s)
           PYM
           TARGET_KT=$(find "$APP_DIR/src/main" -name "MainActivity.kt" | head -n 1)
