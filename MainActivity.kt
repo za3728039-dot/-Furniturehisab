@@ -4,6 +4,7 @@ import android.app.*
 import android.content.*
 import android.graphics.*
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.*
 import android.text.InputType
 import android.util.Base64
@@ -20,8 +21,10 @@ import java.util.*
 
 class MainActivity : ComponentActivity() {
 
+    private val APP_VER = 2
     private val FB_URL = "https://zfh-ledger-default-rtdb.firebaseio.com"
     private val BLOCK_URL = "https://raw.githubusercontent.com/za3728039-dot/-Furniturehisab/main/blocked.txt"
+    private val VER_URL = "https://raw.githubusercontent.com/za3728039-dot/-Furniturehisab/main/version.txt"
 
     private val C_DARK = Color.parseColor("#0B4628")
     private val C_GREEN = Color.parseColor("#0D6832")
@@ -39,6 +42,7 @@ class MainActivity : ComponentActivity() {
     private var hisabStartMs = 0L
     private var hisabEndMs = Long.MAX_VALUE
     private var isUnlocked = false
+    private var updateChecked = false
 
     private var pendingPhotoCb: ((String) -> Unit)? = null
     private var pendingEditItemIdx = -1
@@ -177,8 +181,33 @@ class MainActivity : ComponentActivity() {
             else {
                 buildMainUI()
                 registerUserInCloud()
+                if (!updateChecked) { updateChecked = true; checkUpdate(false) }
             }
         }
+    }
+
+    private fun checkUpdate(manual: Boolean) {
+        Thread {
+            try {
+                val lines = URL(VER_URL).readText().lines().map { it.trim() }.filter { it.isNotEmpty() }
+                val latest = lines.getOrNull(0)?.toIntOrNull() ?: 0
+                val dlUrl = lines.getOrNull(1) ?: ""
+                runOnUiThread {
+                    if (latest > APP_VER && dlUrl.startsWith("http")) {
+                        AlertDialog.Builder(this)
+                            .setTitle("🆕 Update Available")
+                            .setMessage("ZFH Ledger का नया वर्ज़न आ गया है! अभी डाउनलोड करें?")
+                            .setPositiveButton("Update Now") { _, _ ->
+                                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(dlUrl)))
+                            }
+                            .setNegativeButton("Later", null)
+                            .show()
+                    } else if (manual) toast("App is up to date!")
+                }
+            } catch (_: Exception) {
+                if (manual) runOnUiThread { toast("No updates found") }
+            }
+        }.start()
     }
 
     private fun checkBlocked(phone: String, cb: (Boolean) -> Unit) {
@@ -639,6 +668,7 @@ class MainActivity : ComponentActivity() {
         box.addView(pillBtn("📤 ${t("backup")}", C_DARK) { exportLauncher.launch("ZFH_Ledger_Backup.json") })
         box.addView(pillBtn("📥 ${t("restore")}", C_DARK) { importLauncher.launch(arrayOf("application/json", "*/*")) })
         box.addView(pillBtn("☁️ Sync Now", C_GREEN) { syncToCloud(); toast("Synced to Cloud!") })
+        box.addView(pillBtn("🔄 Check Update (v$APP_VER)", C_GREEN) { checkUpdate(true) })
         box.addView(pillBtn("🚪 ${t("logout")}", C_RED) {
             prefs.edit().remove("user_phone").apply()
             showRegistration()
