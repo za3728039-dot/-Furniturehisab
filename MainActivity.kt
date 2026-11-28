@@ -2,594 +2,787 @@ package com.example.furniturehisab
 
 import android.app.*
 import android.content.*
-import android.database.sqlite.*
 import android.graphics.*
 import android.graphics.drawable.GradientDrawable
 import android.os.*
-import android.text.*
+import android.text.InputType
 import android.util.Base64
 import android.view.*
 import android.widget.*
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import org.json.*
-import java.io.File
+import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.*
 
-data class Furniture(val id: Long, val model: String, val size: String, val amount: Double, val dateTime: String, val photo: String, val createdMs: Long)
-data class Payment(val id: Long, val amount: Double, val note: String, val dateTime: String, val createdMs: Long)
-
-class Db(context: Context) : SQLiteOpenHelper(context, "furniture.db", null, 4) {
-    override fun onCreate(db: SQLiteDatabase) {
-        db.execSQL("CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT, model TEXT, size TEXT, amount REAL, dateTime TEXT, photo TEXT, createdMs INTEGER DEFAULT 0)")
-        db.execSQL("CREATE TABLE payments(id INTEGER PRIMARY KEY AUTOINCREMENT, amount REAL, note TEXT, dateTime TEXT, createdMs INTEGER DEFAULT 0)")
-    }
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        db.execSQL("CREATE TABLE IF NOT EXISTS payments(id INTEGER PRIMARY KEY AUTOINCREMENT, amount REAL, note TEXT, dateTime TEXT, createdMs INTEGER DEFAULT 0)")
-        try { db.execSQL("ALTER TABLE items ADD COLUMN createdMs INTEGER DEFAULT 0") } catch (_: Exception) {}
-        try { db.execSQL("ALTER TABLE payments ADD COLUMN createdMs INTEGER DEFAULT 0") } catch (_: Exception) {}
-    }
-    fun all() = mutableListOf<Furniture>().apply {
-        readableDatabase.rawQuery("SELECT id, model, size, amount, dateTime, photo, createdMs FROM items ORDER BY id DESC", null).use { c ->
-            while (c.moveToNext()) add(Furniture(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "", c.getDouble(3), c.getString(4) ?: "", c.getString(5) ?: "", c.getLong(6)))
-        }
-    }
-    fun save(id: Long?, model: String, size: String, amount: Double, date: String, photo: String, ms: Long) {
-        val v = ContentValues().apply { put("model", model); put("size", size); put("amount", amount); put("dateTime", date); put("photo", photo); put("createdMs", ms) }
-        if (id == null) writableDatabase.insert("items", null, v) else writableDatabase.update("items", v, "id=?", arrayOf(id.toString()))
-    }
-    fun delete(id: Long) { writableDatabase.delete("items", "id=?", arrayOf(id.toString())) }
-    fun allPayments() = mutableListOf<Payment>().apply {
-        readableDatabase.rawQuery("SELECT id, amount, note, dateTime, createdMs FROM payments ORDER BY id DESC", null).use { c ->
-            while (c.moveToNext()) add(Payment(c.getLong(0), c.getDouble(1), c.getString(2) ?: "", c.getString(3) ?: "", c.getLong(4)))
-        }
-    }
-    fun savePayment(id: Long?, amount: Double, note: String, date: String, ms: Long) {
-        val v = ContentValues().apply { put("amount", amount); put("note", note); put("dateTime", date); put("createdMs", ms) }
-        if (id == null) writableDatabase.insert("payments", null, v) else writableDatabase.update("payments", v, "id=?", arrayOf(id.toString()))
-    }
-    fun deletePayment(id: Long) { writableDatabase.delete("payments", "id=?", arrayOf(id.toString())) }
-    fun clearAll() { writableDatabase.delete("items", null, null); writableDatabase.delete("payments", null, null) }
-}
-
 class MainActivity : ComponentActivity() {
-    private lateinit var db: Db
-    private lateinit var root: FrameLayout
-    private var chosenPhoto = ""
-    private var chosenDp = ""
-    private var previewImg: ImageView? = null
-    private var dpImg: ImageView? = null
-    private var photoStatus: TextView? = null
-    private var searchText = ""
+
+    private val FB_URL = "https://zfh-ledger-default-rtdb.firebaseio.com"
+    private val BLOCK_URL = "https://raw.githubusercontent.com/za3728039-dot/-Furniturehisab/main/blocked.txt"
+
+    private val C_DARK = Color.parseColor("#0B4628")
+    private val C_GREEN = Color.parseColor("#0D6832")
+    private val C_BG = Color.parseColor("#F2F6F4")
+    private val C_GOLD = Color.parseColor("#FFD43B")
+    private val C_RED = Color.parseColor("#C62828")
+
+    private lateinit var prefs: SharedPreferences
+    private lateinit var rootLayout: LinearLayout
+    private lateinit var contentFrame: FrameLayout
+    private lateinit var navBar: LinearLayout
+
     private var currentTab = 0
-    private var filterByDate = false
-    private var fromMs = 0L
-    private var toMs = 0L
+    private var searchQuery = ""
+    private var hisabStartMs = 0L
+    private var hisabEndMs = Long.MAX_VALUE
+    private var isUnlocked = false
 
-    private val greenDark = 0xFF0B4628.toInt()
-    private val greenBtn = 0xFF0D6832.toInt()
-    private val greenLight = 0xFFE6F4EC.toInt()
-    private val goldColor = 0xFFFFD43B.toInt()
-    private val bgColor = 0xFFF2F6F4.toInt()
-    private val textDark = 0xFF14201A.toInt()
-    private val textMuted = 0xFF5F6F67.toInt()
-    private val blockedUrl = "https://raw.githubusercontent.com/za3728039-dot/-Furniturehisab/main/blocked.txt"
+    private var pendingPhotoCb: ((String) -> Unit)? = null
+    private var pendingEditItemIdx = -1
+    private var tempPhotoB64 = ""
 
-    private fun prefs() = getSharedPreferences("fh_prefs", Context.MODE_PRIVATE)
-    private fun isLockEnabled() = prefs().getBoolean("screen_lock", true)
+    private val langs = listOf(
+        "en" to "English", "hi" to "हिंदी", "mr" to "मराठी",
+        "gu" to "ગુજરાતી", "pa" to "ਪੰਜਾਬੀ", "bn" to "বাংলা",
+        "ta" to "தமிழ்", "te" to "తెలుగు", "ur" to "اردو"
+    )
 
-    private val authLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
-        if (res.resultCode == Activity.RESULT_OK) afterUnlock() else showLockedScreen()
+    private val tr = mapOf(
+        "en" to mapOf("home" to "Home", "search" to "Search", "add" to "Add", "hisab" to "Hisab", "profile" to "Profile", "items" to "Total Items", "bill" to "Total Bill", "mila" to "Received", "baki" to "Balance Due", "add_pay" to "+ Payment Received", "reset" to "Start New Hisab", "all_time" to "All Time", "date_range" to "Date Range", "save" to "Save", "login" to "Continue / Recover Data", "lang" to "Language", "lock" to "Screen Lock", "backup" to "Export Backup", "restore" to "Restore Backup", "logout" to "Logout / Switch Account", "photo" to "Add Photo"),
+        "hi" to mapOf("home" to "होम", "search" to "खोजें", "add" to "जोड़ें", "hisab" to "हिसाब", "profile" to "प्रोफ़ाइल", "items" to "कुल काम", "bill" to "कुल बिल", "mila" to "सेठ से मिला", "baki" to "बाकी लेना है", "add_pay" to "+ सेठ से पैसा मिला", "reset" to "नया हिसाब चालू करें", "all_time" to "पूरा हिसाब", "date_range" to "तारीख से तारीख", "save" to "सेव करें", "login" to "लॉगिन / पुराना डेटा वापस लाएं", "lang" to "भाषा", "lock" to "स्क्रीन लॉक", "backup" to "बैकअप सेव करें", "restore" to "बैकअप वापस लाएं", "logout" to "लॉगआउट / नंबर बदलें", "photo" to "फोटो लगाएं"),
+        "mr" to mapOf("home" to "होम", "search" to "शोधा", "add" to "जोडा", "hisab" to "हिशोब", "profile" to "प्रोफाइल", "items" to "एकूण काम", "bill" to "एकूण बिल", "mila" to "मिळाले", "baki" to "बाकी येणे", "add_pay" to "+ पैसे मिळाले", "reset" to "नवीन हिशोब सुरू करा", "all_time" to "संपूर्ण", "date_range" to "तारखेनुसार", "save" to "सेव्ह करा", "login" to "लॉगिन / डेटा परत आणा", "lang" to "भाषा", "lock" to "स्क्रीन लॉक", "backup" to "बॅकअप सेव्ह", "restore" to "बॅकअप रिस्टोअर", "logout" to "लॉगआउट", "photo" to "फोटो जोडा"),
+        "gu" to mapOf("home" to "હોમ", "search" to "શોધો", "add" to "ઉમેરો", "hisab" to "હિસાબ", "profile" to "પ્રોફાઇલ", "items" to "કુલ કામ", "bill" to "કુલ બિલ", "mila" to "મળ્યા", "baki" to "બાકી લેવાના", "add_pay" to "+ પૈસા મળ્યા", "reset" to "નવો હિસાબ શરૂ કરો", "all_time" to "બધો હિસાબ", "date_range" to "તારીખ મુજબ", "save" to "સેવ કરો", "login" to "લોગિન / ડેટા પાછો લાવો", "lang" to "ભાષા", "lock" to "સ્ક્રીન લોક", "backup" to "બેકઅપ સેવ", "restore" to "બેકઅપ રિસ્ટોર", "logout" to "લોગઆઉટ", "photo" to "ફોટો ઉમેરો"),
+        "pa" to mapOf("home" to "ਹੋਮ", "search" to "ਖੋਜੋ", "add" to "ਜੋੜੋ", "hisab" to "ਹਿਸਾਬ", "profile" to "ਪ੍ਰੋਫਾਈਲ", "items" to "ਕੁੱਲ ਕੰਮ", "bill" to "ਕੁੱਲ ਬਿੱਲ", "mila" to "ਮਿਲੇ", "baki" to "ਬਾਕੀ ਲੈਣੇ", "add_pay" to "+ ਪੈਸੇ ਮਿਲੇ", "reset" to "ਨਵਾਂ ਹਿਸਾਬ ਸ਼ੁਰੂ ਕਰੋ", "all_time" to "ਸਾਰਾ ਹਿਸਾਬ", "date_range" to "ਤਾਰੀਖ ਮੁਤਾਬਕ", "save" to "ਸੇਵ ਕਰੋ", "login" to "ਲੌਗਇਨ / ਡਾਟਾ ਵਾਪਸ", "lang" to "ਭਾਸ਼ਾ", "lock" to "ਸਕ੍ਰੀਨ ਲੌਕ", "backup" to "ਬੈਕਅੱਪ", "restore" to "ਰੀਸਟੋਰ", "logout" to "ਲੌਗਆਉਟ", "photo" to "ਫੋਟੋ ਲਗਾਓ"),
+        "bn" to mapOf("home" to "হোম", "search" to "খুঁজুন", "add" to "যোগ করুন", "hisab" to "হিসাব", "profile" to "প্রোফাইল", "items" to "মোট কাজ", "bill" to "মোট বিল", "mila" to "জমা", "baki" to "বাকি পাওনা", "add_pay" to "+ টাকা জমা", "reset" to "নতুন হিসাব শুরু", "all_time" to "সব হিসাব", "date_range" to "তারিখ অনুযায়ী", "save" to "সেভ করুন", "login" to "লগইন / ডেটা পুনরুদ্ধার", "lang" to "ভাষা", "lock" to "স্ক্রিন লক", "backup" to "ব্যাকআপ", "restore" to "রিস্টোর", "logout" to "লগআউট", "photo" to "ছবি দিন"),
+        "ta" to mapOf("home" to "முகப்பு", "search" to "தேடு", "add" to "சேர்", "hisab" to "கணக்கு", "profile" to "சுயவிவரம்", "items" to "மொத்த வேலை", "bill" to "மொத்த பில்", "mila" to "பெற்றது", "baki" to "பாக்கி", "add_pay" to "+ பணம் பெற்றது", "reset" to "புதிய கணக்கு", "all_time" to "முழு கணக்கு", "date_range" to "தேதி வாரியாக", "save" to "சேமி", "login" to "உள்நுழை / மீட்டெடு", "lang" to "மொழி", "lock" to "திரை பூட்டு", "backup" to "காப்பு", "restore" to "மீட்டமை", "logout" to "வெளியேறு", "photo" to "புகைப்படம்"),
+        "te" to mapOf("home" to "హోమ్", "search" to "వెతకండి", "add" to "జోడించు", "hisab" to "లెక్క", "profile" to "ప్రొఫైల్", "items" to "మొత్తం పని", "bill" to "మొత్తం బిల్లు", "mila" to "వచ్చింది", "baki" to "బాకీ", "add_pay" to "+ డబ్బు వచ్చింది", "reset" to "కొత్త లెక్క", "all_time" to "మొత్తం", "date_range" to "తేదీ ప్రకారం", "save" to "సేవ్", "login" to "లాగిన్ / డేటా రికవర్", "lang" to "భాష", "lock" to "స్క్రీన్ లాక్", "backup" to "బ్యాకప్", "restore" to "రీస్టోర్", "logout" to "లాగౌట్", "photo" to "ఫోటో"),
+        "ur" to mapOf("home" to "ہوم", "search" to "تلاش", "add" to "شامل کریں", "hisab" to "حساب", "profile" to "پروفائل", "items" to "کل کام", "bill" to "کل بل", "mila" to "وصول", "baki" to "باقی لینا ہے", "add_pay" to "+ پیسے ملے", "reset" to "نیا حساب شروع کریں", "all_time" to "مکمل حساب", "date_range" to "تاریخ سے تاریخ", "save" to "محفوظ کریں", "login" to "لاگ ان / ڈیٹا ریکور", "lang" to "زبان", "lock" to "اسکرین لاک", "backup" to "بیک اپ", "restore" to "ریسٹور", "logout" to "لاگ آؤٹ", "photo" to "تصویر لگائیں")
+    )
+
+    private fun t(k: String): String {
+        val code = prefs.getString("lang", "hi") ?: "hi"
+        return tr[code]?.get(k) ?: tr["en"]?.get(k) ?: k
     }
-    private val pickPhoto = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+
+    private val camLauncher = registerForActivityResult(ActivityResultContracts.TakePicturePreview()) { bmp ->
+        if (bmp != null) pendingPhotoCb?.invoke(bmpToB64(bmp))
+    }
+
+    private val galLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
-            val dest = File(filesDir, "photo_${System.currentTimeMillis()}.jpg")
-            contentResolver.openInputStream(uri)?.use { input -> dest.outputStream().use { input.copyTo(it) } }
-            chosenPhoto = dest.absolutePath; BitmapFactory.decodeFile(chosenPhoto)?.let { previewImg?.setImageBitmap(it) }; photoStatus?.text = "📷 Change Photo ✓"
+            try {
+                contentResolver.openInputStream(uri)?.use {
+                    val bmp = BitmapFactory.decodeStream(it)
+                    if (bmp != null) pendingPhotoCb?.invoke(bmpToB64(bmp))
+                }
+            } catch (_: Exception) {}
         }
-    }
-    private val takeCameraPhoto = registerForActivityResult(ActivityResultContracts.TakePicturePreview()) { bmp ->
-        if (bmp != null) {
-            val dest = File(filesDir, "photo_${System.currentTimeMillis()}.jpg")
-            dest.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 92, it) }
-            chosenPhoto = dest.absolutePath; previewImg?.setImageBitmap(bmp); photoStatus?.text = "📷 Change Photo ✓"
-        }
-    }
-    private val pickDp = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) {
-            val dest = File(filesDir, "dp_${System.currentTimeMillis()}.jpg")
-            contentResolver.openInputStream(uri)?.use { input -> dest.outputStream().use { input.copyTo(it) } }
-            chosenDp = dest.absolutePath; BitmapFactory.decodeFile(chosenDp)?.let { dpImg?.setImageBitmap(it) }
-        }
-    }
-    private val takeDpCamera = registerForActivityResult(ActivityResultContracts.TakePicturePreview()) { bmp ->
-        if (bmp != null) {
-            val dest = File(filesDir, "dp_${System.currentTimeMillis()}.jpg")
-            dest.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 92, it) }
-            chosenDp = dest.absolutePath; dpImg?.setImageBitmap(bmp)
-        }
-    }
-    private val exportBackup = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
-        if (uri != null) try { contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(makeBackup().toString(2)) }; toast("Backup Saved ✓") } catch (_: Exception) { toast("Backup failed") }
-    }
-    private val importBackup = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) try {
-            val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
-            restoreBackup(JSONObject(text)); openTab(0); toast("Backup Restored ✓")
-        } catch (_: Exception) { toast("Invalid backup file") }
     }
 
-    @Suppress("DEPRECATION")
+    private val lockLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+        if (res.resultCode == RESULT_OK) {
+            isUnlocked = true
+            startAppFlow()
+        } else finish()
+    }
+
+    private val exportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri != null) {
+            try {
+                val root = JSONObject().apply {
+                    put("items", getArr("items"))
+                    put("payments", getArr("payments"))
+                }
+                contentResolver.openOutputStream(uri)?.use { it.write(root.toString().toByteArray()) }
+                toast("Backup Saved!")
+            } catch (_: Exception) { toast("Backup Failed") }
+        }
+    }
+
+    private val importLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            try {
+                val txt = contentResolver.openInputStream(uri)?.bufferedReader()?.readText() ?: return@registerForActivityResult
+                val obj = JSONObject(txt)
+                if (obj.has("items")) prefs.edit().putString("items", obj.getJSONArray("items").toString()).apply()
+                if (obj.has("payments")) prefs.edit().putString("payments", obj.getJSONArray("payments").toString()).apply()
+                syncToCloud()
+                renderTab()
+                toast("Backup Restored!")
+            } catch (_: Exception) { toast("Invalid File") }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = greenDark; window.navigationBarColor = 0xFFFFFFFF.toInt()
-        db = Db(this)
-        val c = Calendar.getInstance().apply { set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0) }
-        fromMs = c.timeInMillis
-        toMs = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 23); set(Calendar.MINUTE, 59); set(Calendar.SECOND, 59) }.timeInMillis
-        root = FrameLayout(this).apply {
-            setBackgroundColor(greenDark)
-            setOnApplyWindowInsetsListener { v, insets -> v.setPadding(0, insets.systemWindowInsetTop, 0, insets.systemWindowInsetBottom); insets }
-        }
-        setContentView(root); showSplash()
+        prefs = getSharedPreferences("zfh_prefs", MODE_PRIVATE)
+        showSplash()
     }
 
     private fun showSplash() {
-        root.removeAllViews()
-        val splash = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(24), dp(24), dp(24), dp(24))
-            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0xFF146C43.toInt(), 0xFF062C1A.toInt()))
+        val sp = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(C_DARK)
+            addView(TextView(context).apply {
+                text = "ZFH"
+                textSize = 48f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(C_GOLD)
+                gravity = Gravity.CENTER
+            })
+            addView(TextView(context).apply {
+                text = "Ledger"
+                textSize = 24f
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+            })
+            addView(TextView(context).apply {
+                text = "Hisab Rakho, Tension Chhodo..."
+                textSize = 14f
+                setTextColor(Color.parseColor("#B9E4C9"))
+                setPadding(0, 24, 0, 0)
+                gravity = Gravity.CENTER
+            })
         }
-        splash.addView(TextView(this).apply { text = "🏠"; textSize = 72f; gravity = Gravity.CENTER })
-        splash.addView(TextView(this).apply { text = "ZFH"; textSize = 36f; setTypeface(null, Typeface.BOLD); setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER })
-        splash.addView(TextView(this).apply { text = "Ledger"; textSize = 36f; setTypeface(null, Typeface.BOLD); setTextColor(goldColor); gravity = Gravity.CENTER }, lp(-1, -2, dp(12)))
-        splash.addView(TextView(this).apply { text = "Hisab Rakho,\nTension Chhodo..."; textSize = 18f; setTypeface(null, Typeface.ITALIC); setTextColor(0xFFE8F5E9.toInt()); gravity = Gravity.CENTER }, lp(-1, -2, dp(28)))
-        splash.addView(ProgressBar(this).apply { isIndeterminate = true })
-        root.addView(splash)
-        Handler(Looper.getMainLooper()).postDelayed({ checkAuthAndOpen() }, 900)
+        setContentView(sp)
+        Handler(Looper.getMainLooper()).postDelayed({ checkSecurity() }, 1200)
     }
 
-    @Suppress("DEPRECATION")
-    private fun checkAuthAndOpen() {
-        if (!isLockEnabled()) { afterUnlock(); return }
-        try {
-            val km = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
-            if (km.isKeyguardSecure) {
-                km.createConfirmDeviceCredentialIntent("ZFH Ledger Locked", "Fingerprint, Face Lock ya Screen Lock se unlock karein")?.let {
-                    showLockedScreen(); authLauncher.launch(it); return
-                }
-            }
-        } catch (_: Throwable) {}
-        afterUnlock()
-    }
-
-    private fun afterUnlock() {
-        if (!prefs().getBoolean("reg_done", false)) showRegister(false) else checkNotBlocked()
-    }
-
-    private fun checkNotBlocked() {
-        val myPhone = (prefs().getString("reg_phone", "") ?: "").filter { it.isDigit() }.takeLast(10)
-        if (myPhone.length < 10) { showRegister(false); return }
-        Thread {
-            var isBlocked: Boolean? = null
+    private fun checkSecurity() {
+        val lockOn = prefs.getBoolean("lock_on", false)
+        if (lockOn && !isUnlocked) {
             try {
-                val conn = (URL("$blockedUrl?t=${System.currentTimeMillis()}").openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 4000; readTimeout = 4000
-                }
-                if (conn.responseCode == 200) {
-                    val text = conn.inputStream.bufferedReader().readText()
-                    isBlocked = text.lines().any { line -> line.filter { it.isDigit() }.takeLast(10) == myPhone }
-                } else if (conn.responseCode == 404) {
-                    isBlocked = false
-                }
+                val km = getSystemService(KEYGUARD_SERVICE) as KeyguardManager
+                @Suppress("DEPRECATION")
+                val intent = km.createConfirmDeviceCredentialIntent("ZFH Ledger", "Unlock App")
+                if (intent != null) { lockLauncher.launch(intent); return }
             } catch (_: Exception) {}
-            runOnUiThread {
-                when (isBlocked) {
-                    true -> { prefs().edit().putBoolean("is_blocked", true).apply(); showBlockedScreen(myPhone) }
-                    false -> { prefs().edit().putBoolean("is_blocked", false).apply(); openTab(0) }
-                    null -> if (prefs().getBoolean("is_blocked", false)) showBlockedScreen(myPhone) else openTab(0)
-                }
+        }
+        isUnlocked = true
+        startAppFlow()
+    }
+
+    private fun startAppFlow() {
+        val phone = prefs.getString("user_phone", "") ?: ""
+        if (phone.length != 10) {
+            showRegistration()
+            return
+        }
+        checkBlocked(phone) { blocked ->
+            if (blocked) showBlockedScreen()
+            else {
+                buildMainUI()
+                registerUserInCloud()
             }
+        }
+    }
+
+    private fun checkBlocked(phone: String, cb: (Boolean) -> Unit) {
+        Thread {
+            var isBlk = false
+            try {
+                val txt = URL(BLOCK_URL).readText()
+                isBlk = txt.lines().any { it.trim() == phone }
+            } catch (_: Exception) {}
+            runOnUiThread { cb(isBlk) }
         }.start()
     }
 
-    private fun showBlockedScreen(phone: String) {
-        root.removeAllViews()
-        val p = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(28), dp(28), dp(28), dp(28))
-            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0xFF7B1F1F.toInt(), 0xFF3A0C0C.toInt()))
-        }
-        p.addView(TextView(this).apply { text = "⛔"; textSize = 64f; gravity = Gravity.CENTER }, lp(-1, -2, dp(12)))
-        p.addView(TextView(this).apply { text = "Account Blocked"; textSize = 24f; setTypeface(null, Typeface.BOLD); setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER }, lp(-1, -2, dp(8)))
-        p.addView(TextView(this).apply {
-            text = "Number ($phone) ko Admin (Zubair) ne block kar diya hai."; textSize = 15f; setTextColor(0xFFFFCDD2.toInt()); gravity = Gravity.CENTER
-        }, lp(-1, -2, dp(24)))
-        p.addView(TextView(this).apply {
-            text = "🔄  Recheck Status"; textSize = 16f; setTypeface(null, Typeface.BOLD); setTextColor(0xFF7B1F1F.toInt()); gravity = Gravity.CENTER
-            background = roundBg(0xFFFFFFFF.toInt(), 26); setPadding(dp(24), dp(12), dp(24), dp(12)); setOnClickListener { checkNotBlocked() }
-        })
-        root.addView(p)
-    }
-
-    private fun showLockedScreen() {
-        root.removeAllViews()
-        val p = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(28), dp(28), dp(28), dp(28))
-            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0xFF146C43.toInt(), 0xFF062C1A.toInt()))
-        }
-        p.addView(TextView(this).apply { text = "🔒"; textSize = 64f; gravity = Gravity.CENTER }, lp(-1, -2, dp(14)))
-        p.addView(TextView(this).apply { text = "ZFH Ledger Locked"; textSize = 24f; setTypeface(null, Typeface.BOLD); setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER }, lp(-1, -2, dp(24)))
-        p.addView(TextView(this).apply {
-            text = "🔓  Unlock App"; textSize = 17f; setTypeface(null, Typeface.BOLD); setTextColor(greenDark); gravity = Gravity.CENTER
-            background = roundBg(0xFFFFFFFF.toInt(), 26); setPadding(dp(28), dp(14), dp(28), dp(14)); setOnClickListener { checkAuthAndOpen() }
-        })
-        root.addView(p)
-    }
-
-    private fun showRegister(isEdit: Boolean) {
-        chosenDp = prefs().getString("reg_dp", "") ?: ""
-        root.removeAllViews()
-        val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
-        page.addView(topBar(if (isEdit) "Edit Profile" else "Registration (रजिस्ट्रेशन)"))
-        val scroll = ScrollView(this); val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(dp(20), dp(24), dp(20), dp(24)) }
-        val avatar = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP; background = roundBg(greenLight, 55, greenBtn); clipToOutline = true
-            val bmp = if (chosenDp.isNotBlank() && File(chosenDp).exists()) BitmapFactory.decodeFile(chosenDp) else null
-            if (bmp != null) setImageBitmap(bmp) else setImageResource(android.R.drawable.ic_menu_myplaces)
-        }
-        dpImg = avatar; box.addView(avatar, LinearLayout.LayoutParams(dp(110), dp(110)).apply { bottomMargin = dp(10) })
-        box.addView(TextView(this).apply {
-            text = "📷 DP लगाएं / बदलें"; textSize = 14f; setTypeface(null, Typeface.BOLD); setTextColor(0xFFFFFFFF.toInt())
-            background = roundBg(greenBtn, 20); setPadding(dp(16), dp(8), dp(16), dp(8))
-            setOnClickListener {
-                AlertDialog.Builder(this@MainActivity).setTitle("Select Profile DP")
-                    .setItems(arrayOf("📷 Camera", "🖼️ Gallery")) { _, w -> if (w == 0) takeDpCamera.launch(null) else pickDp.launch("image/*") }.show()
-            }
-        }, LinearLayout.LayoutParams(-2, -2).apply { bottomMargin = dp(20) })
-
-        fun rInp(label: String, valStr: String, phone: Boolean = false): EditText {
-            val c = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = roundBg(0xFFFFFFFF.toInt(), 12, 0xFFD5E2DB.toInt()); setPadding(dp(14), dp(10), dp(14), dp(10)) }
-            c.addView(TextView(this).apply { text = label; textSize = 12f; setTextColor(greenDark); setTypeface(null, Typeface.BOLD) })
-            val e = EditText(this).apply { setText(valStr); setBackgroundColor(0); setPadding(0, dp(2), 0, 0); textSize = 16f; if (phone) inputType = InputType.TYPE_CLASS_PHONE }
-            c.addView(e); box.addView(c, lp(-1, -2, dp(12))); return e
-        }
-        val nameE = rInp("Full Name (अपना नाम)", prefs().getString("reg_name", "") ?: "")
-        val phoneE = rInp("Mobile Number (मोबाइल नंबर)", prefs().getString("reg_phone", "") ?: "", true)
-        val shopE = rInp("Shop / Business Name (Optional)", prefs().getString("reg_shop", "") ?: "")
-
-        box.addView(TextView(this).apply {
-            text = if (isEdit) "✓  Save Profile" else "✓  Register & Start"; textSize = 17f; setTypeface(null, Typeface.BOLD); setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER
-            background = roundBg(greenBtn, 26); setPadding(dp(16), dp(14), dp(16), dp(14))
-            setOnClickListener {
-                val nm = nameE.text.toString().trim(); val ph = phoneE.text.toString().trim().filter { it.isDigit() }.takeLast(10)
-                if (nm.isBlank() || ph.length < 10) toast("Sahi Naam aur 10-digit Mobile Number bhariye")
-                else {
-                    prefs().edit().putBoolean("reg_done", true).putString("reg_name", nm).putString("reg_phone", ph)
-                        .putString("reg_shop", shopE.text.toString().trim()).putString("reg_dp", chosenDp).apply()
-                    checkNotBlocked()
-                }
-            }
-        }, lp(-1, -2, dp(10)))
-        if (isEdit) box.addView(TextView(this).apply { text = "Cancel"; textSize = 15f; setTextColor(textMuted); setPadding(dp(10), dp(10), dp(10), dp(10)); setOnClickListener { openTab(3) } })
-        scroll.addView(box); page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f)); root.addView(page)
-    }
-
-    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
-    private fun roundBg(color: Int, r: Int, stroke: Int = 0) = GradientDrawable().apply { setColor(color); cornerRadius = dp(r).toFloat(); if (stroke != 0) setStroke(dp(1), stroke) }
-
-    private fun topBar(title: String, rightText: String = "", onRight: (() -> Unit)? = null) = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setBackgroundColor(greenDark); setPadding(dp(16), dp(14), dp(16), dp(14))
-        addView(TextView(context).apply { text = title; textSize = 20f; setTypeface(null, Typeface.BOLD); setTextColor(0xFFFFFFFF.toInt()) }, LinearLayout.LayoutParams(0, -2, 1f))
-        if (rightText.isNotEmpty() && onRight != null) addView(TextView(context).apply { text = rightText; textSize = 20f; setTextColor(0xFFFFFFFF.toInt()); setPadding(dp(12), dp(4), dp(4), dp(4)); setOnClickListener { onRight() } })
-    }
-
-    private fun bottomBar(): LinearLayout {
-        val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setBackgroundColor(0xFFFFFFFF.toInt()); elevation = dp(8).toFloat(); setPadding(0, dp(10), 0, dp(10)) }
-        fun tab(icon: String, label: String, active: Boolean, onClick: () -> Unit) {
-            val item = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setOnClickListener { onClick() } }
-            item.addView(TextView(this).apply { text = icon; textSize = 20f; gravity = Gravity.CENTER })
-            item.addView(TextView(this).apply { text = label; textSize = 11f; gravity = Gravity.CENTER; setTypeface(null, if (active) Typeface.BOLD else Typeface.NORMAL); setTextColor(if (active) greenBtn else textMuted) })
-            bar.addView(item, LinearLayout.LayoutParams(0, -2, 1f))
-        }
-        tab("🏠", "Home", currentTab == 0) { openTab(0) }
-        tab("🔍", "Search", currentTab == 1) { openTab(1) }
-        val plus = TextView(this).apply { text = "+"; textSize = 22f; setTypeface(null, Typeface.BOLD); setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER; background = roundBg(greenBtn, 16); setPadding(dp(14), dp(4), dp(14), dp(4)); setOnClickListener { showForm(null) } }
-        bar.addView(FrameLayout(this).apply { addView(plus, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER)) }, LinearLayout.LayoutParams(0, -2, 1f))
-        tab("💰", "Hisab", currentTab == 2) { openTab(2) }
-        tab("⚙️", "Profile", currentTab == 3) { openTab(3) }
-        return bar
-    }
-
-    private fun openTab(tab: Int) { currentTab = tab; when (tab) { 0 -> showHome(); 1 -> showSearchTab(); 2 -> showHisabDashboard(); 3 -> showSettings() } }
-    private fun wrapWithBottomBar(page: LinearLayout) {
-        page.addView(View(this).apply { setBackgroundColor(0xFFDCE7E1.toInt()) }, LinearLayout.LayoutParams(-1, dp(1)))
-        page.addView(bottomBar()); root.removeAllViews(); root.addView(page)
-    }
-
-    private fun startNewHisab() {
-        AlertDialog.Builder(this).setTitle("नया हिसाब चालू करें?").setMessage("क्या आप सारे फर्नीचर और पेमेंट रिकॉर्ड साफ करके ₹0 से नया हिसाब शुरू करना चाहते हैं?")
-            .setNeutralButton("पहले Backup सेव करें") { _, _ -> exportBackup.launch("ZFH_Ledger_Backup.json") }
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("हाँ, नया हिसाब चालू करें") { _, _ -> db.clearAll(); openTab(currentTab); toast("नया हिसाब शुरू हो गया ✓") }.show()
-    }
-
-    private fun showHome() {
-        val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
-        page.addView(topBar("ZFH Ledger", "☁", { showBackup() }))
-        val scroll = ScrollView(this)
-        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(16), dp(16), dp(24)) }
-        val records = db.all(); val total = records.sumOf { it.amount }
-        val sc = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; background = roundBg(0xFFFFFFFF.toInt(), 18, 0xFFDCE7E1.toInt()); elevation = dp(4).toFloat(); setPadding(dp(18), dp(18), dp(18), dp(18)) }
-        val sl = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        sl.addView(TextView(this).apply { text = "Total Kaam (All Entries)"; textSize = 14f; setTextColor(textMuted) })
-        sl.addView(TextView(this).apply { text = "₹ ${money(total)}"; textSize = 27f; setTypeface(null, Typeface.BOLD); setTextColor(textDark); setPadding(0, dp(4), 0, dp(6)) })
-        sl.addView(TextView(this).apply { text = "📊 Total Furniture: ${records.size}"; textSize = 14f; setTypeface(null, Typeface.BOLD); setTextColor(greenDark) })
-        sc.addView(sl, LinearLayout.LayoutParams(0, -2, 1f))
-        sc.addView(TextView(this).apply { text = "📈"; textSize = 38f; gravity = Gravity.CENTER; background = roundBg(greenLight, 14); setPadding(dp(14), dp(10), dp(14), dp(10)) })
-        body.addView(sc, lp(-1, -2, dp(14)))
-        body.addView(TextView(this).apply {
-            text = "+  Add New Furniture"; textSize = 17f; setTypeface(null, Typeface.BOLD); setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER
-            background = roundBg(greenBtn, 26); elevation = dp(3).toFloat(); setPadding(dp(16), dp(14), dp(16), dp(14)); setOnClickListener { showForm(null) }
-        }, lp(-1, -2, dp(18)))
-        body.addView(TextView(this).apply { text = "Furniture Photo Series (${records.size})"; textSize = 17f; setTypeface(null, Typeface.BOLD); setTextColor(textDark) }, lp(-1, -2, dp(10)))
-        if (records.isEmpty()) body.addView(TextView(this).apply { text = "Abhi koi entry nahi hai.\n'+ Add New Furniture' par tap karein."; gravity = Gravity.CENTER; textSize = 15f; setTextColor(textMuted); setPadding(dp(16), dp(30), dp(16), dp(30)); background = roundBg(0xFFFFFFFF.toInt(), 14) })
-        else records.forEachIndexed { idx, item -> body.addView(recordCard(item, records.size - idx), lp(-1, -2, dp(10))) }
-        scroll.addView(body); page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f)); wrapWithBottomBar(page)
-    }
-
-    private fun showSearchTab() {
-        val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
-        page.addView(topBar("Search Furniture"))
-        val sb = EditText(this).apply { hint = "🔍 Search Model, Size, Date or Amount..."; setText(searchText); background = roundBg(0xFFFFFFFF.toInt(), 12, 0xFFD0DDD6.toInt()); setPadding(dp(14), dp(12), dp(14), dp(12)) }
-        page.addView(sb, LinearLayout.LayoutParams(-1, -2).apply { setMargins(dp(14), dp(12), dp(14), dp(6)) })
-        val scroll = ScrollView(this); val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(8), dp(14), dp(20)) }
-        fun render(q: String) {
-            list.removeAllViews()
-            val m = db.all().filter { q.isBlank() || it.model.contains(q, true) || it.size.contains(q, true) || it.amount.toString().contains(q) || it.dateTime.contains(q, true) }
-            m.forEachIndexed { i, it -> list.addView(recordCard(it, m.size - i), lp(-1, -2, dp(10))) }
-        }
-        render(searchText)
-        sb.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) { searchText = s.toString(); render(searchText) }
-            override fun afterTextChanged(s: Editable?) {}
-        })
-        scroll.addView(list); page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f)); wrapWithBottomBar(page)
-    }
-
-    private fun showHisabDashboard() {
-        val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
-        page.addView(topBar("हिसाब (Hisab Dashboard)", "🔄", { startNewHisab() }))
-        val scroll = ScrollView(this); val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(14), dp(16), dp(24)) }
-        val fmt = SimpleDateFormat("dd MMM yyyy", Locale.getDefault())
-        val mr = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        mr.addView(TextView(this).apply {
-            text = "All Time (कुल)"; gravity = Gravity.CENTER; textSize = 13f; setTypeface(null, Typeface.BOLD); setTextColor(if (!filterByDate) 0xFFFFFFFF.toInt() else greenDark)
-            background = roundBg(if (!filterByDate) greenBtn else 0xFFFFFFFF.toInt(), 20, greenBtn); setPadding(dp(10), dp(9), dp(10), dp(9)); setOnClickListener { filterByDate = false; showHisabDashboard() }
-        }, LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(8) })
-        mr.addView(TextView(this).apply {
-            text = "📅 तारीख से तारीख (1–30)"; gravity = Gravity.CENTER; textSize = 13f; setTypeface(null, Typeface.BOLD); setTextColor(if (filterByDate) 0xFFFFFFFF.toInt() else greenDark)
-            background = roundBg(if (filterByDate) greenBtn else 0xFFFFFFFF.toInt(), 20, greenBtn); setPadding(dp(10), dp(9), dp(10), dp(9)); setOnClickListener { filterByDate = true; showHisabDashboard() }
-        }, LinearLayout.LayoutParams(0, -2, 1f))
-        body.addView(mr, lp(-1, -2, dp(10)))
-        if (filterByDate) {
-            val dr = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            fun pick(isFrom: Boolean) {
-                val cal = Calendar.getInstance().apply { timeInMillis = if (isFrom) fromMs else toMs }
-                DatePickerDialog(this, { _, y, m, d ->
-                    val c = Calendar.getInstance().apply { set(y, m, d, if (isFrom) 0 else 23, if (isFrom) 0 else 59, if (isFrom) 0 else 59) }
-                    if (isFrom) fromMs = c.timeInMillis else toMs = c.timeInMillis; showHisabDashboard()
-                }, cal.get(Calendar.YEAR), cal.get(Calendar.MONTH), cal.get(Calendar.DAY_OF_MONTH)).show()
-            }
-            dr.addView(TextView(this).apply { text = "From: ${fmt.format(Date(fromMs))}"; gravity = Gravity.CENTER; textSize = 13f; setTextColor(textDark); background = roundBg(0xFFFFFFFF.toInt(), 12, 0xFFD0DDD6.toInt()); setPadding(dp(10), dp(10), dp(10), dp(10)); setOnClickListener { pick(true) } }, LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(8) })
-            dr.addView(TextView(this).apply { text = "To: ${fmt.format(Date(toMs))}"; gravity = Gravity.CENTER; textSize = 13f; setTextColor(textDark); background = roundBg(0xFFFFFFFF.toInt(), 12, 0xFFD0DDD6.toInt()); setPadding(dp(10), dp(10), dp(10), dp(10)); setOnClickListener { pick(false) } }, LinearLayout.LayoutParams(0, -2, 1f))
-            body.addView(dr, lp(-1, -2, dp(12)))
-        }
-        val items = db.all().let { if (!filterByDate) it else it.filter { x -> x.createdMs == 0L || x.createdMs in fromMs..toMs } }
-        val pays = db.allPayments().let { if (!filterByDate) it else it.filter { x -> x.createdMs == 0L || x.createdMs in fromMs..toMs } }
-        val bill = items.sumOf { it.amount }; val rec = pays.sumOf { it.amount }; val bal = bill - rec
-        val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = roundBg(0xFFFFFFFF.toInt(), 18, 0xFFDCE7E1.toInt()); elevation = dp(4).toFloat(); setPadding(dp(18), dp(16), dp(18), dp(16)) }
-        fun sRow(l: String, v: String, vc: Int, big: Boolean = false) {
-            val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-            r.addView(TextView(this).apply { text = l; textSize = if (big) 16f else 14f; setTextColor(textMuted) }, LinearLayout.LayoutParams(0, -2, 1f))
-            r.addView(TextView(this).apply { text = v; textSize = if (big) 22f else 17f; setTypeface(null, Typeface.BOLD); setTextColor(vc) })
-            card.addView(r, lp(-1, -2, dp(8)))
-        }
-        sRow("Kaam (Items Done)", "${items.size} Items", textDark)
-        sRow("Total Kaam (Bill)", "₹ ${money(bill)}", textDark)
-        sRow("Seth ne Diya (Mila)", "₹ ${money(rec)}", greenBtn)
-        card.addView(View(this).apply { setBackgroundColor(0xFFE0EAE4.toInt()) }, lp(-1, dp(1), dp(10)))
-        sRow("Baki Lena Hai (Balance)", "₹ ${money(bal)}", if (bal > 0) 0xFFB71C1C.toInt() else greenDark, true)
-        card.addView(TextView(this).apply { text = "🧾 Total Transactions: ${pays.size}"; textSize = 13f; setTypeface(null, Typeface.BOLD); setTextColor(greenDark); background = roundBg(greenLight, 10); setPadding(dp(12), dp(8), dp(12), dp(8)) })
-        body.addView(card, lp(-1, -2, dp(14)))
-        body.addView(TextView(this).apply { text = "+  सेठ से पैसा मिला (Add Payment)"; textSize = 16f; setTypeface(null, Typeface.BOLD); setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER; background = roundBg(greenBtn, 26); elevation = dp(3).toFloat(); setPadding(dp(16), dp(14), dp(16), dp(14)); setOnClickListener { showPaymentDialog(null) } }, lp(-1, -2, dp(16)))
-        body.addView(TextView(this).apply { text = "Transaction History (${pays.size})"; textSize = 16f; setTypeface(null, Typeface.BOLD); setTextColor(textDark) }, lp(-1, -2, dp(10)))
-        if (pays.isEmpty()) body.addView(TextView(this).apply { text = "Is period me koi payment transaction nahi hai."; gravity = Gravity.CENTER; textSize = 15f; setTextColor(textMuted); setPadding(dp(16), dp(26), dp(16), dp(26)); background = roundBg(0xFFFFFFFF.toInt(), 14) })
-        else pays.forEachIndexed { idx, p ->
-            val tc = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; background = roundBg(0xFFFFFFFF.toInt(), 14, 0xFFE2EBE6.toInt()); elevation = dp(2).toFloat(); setPadding(dp(14), dp(12), dp(10), dp(12)) }
-            tc.addView(TextView(this).apply { text = "💵"; textSize = 24f; gravity = Gravity.CENTER; background = roundBg(greenLight, 12); setPadding(dp(12), dp(10), dp(12), dp(10)) }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(12) })
-            val ti = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            ti.addView(TextView(this).apply { text = "#${pays.size - idx}   ₹ ${money(p.amount)}"; textSize = 17f; setTypeface(null, Typeface.BOLD); setTextColor(greenBtn) })
-            if (p.note.isNotBlank()) ti.addView(TextView(this).apply { text = p.note; textSize = 14f; setTextColor(textDark) })
-            ti.addView(TextView(this).apply { text = "📅 ${p.dateTime}"; textSize = 11f; setTextColor(textMuted) })
-            tc.addView(ti, LinearLayout.LayoutParams(0, -2, 1f))
-            tc.addView(TextView(this).apply {
-                text = "⋮"; textSize = 22f; setTypeface(null, Typeface.BOLD); setTextColor(textMuted); setPadding(dp(10), dp(6), dp(6), dp(6))
-                setOnClickListener { v -> PopupMenu(context, v).apply { menu.add("Edit"); menu.add("Delete"); setOnMenuItemClickListener { m -> if (m.title == "Edit") showPaymentDialog(p) else AlertDialog.Builder(context).setMessage("Delete ₹ ${money(p.amount)}?").setNegativeButton("Cancel", null).setPositiveButton("Delete") { _, _ -> db.deletePayment(p.id); showHisabDashboard() }.show(); true } }.show() }
+    private fun showBlockedScreen() {
+        val v = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(Color.WHITE)
+            setPadding(48, 48, 48, 48)
+            addView(TextView(context).apply {
+                text = "⛔ Account Blocked"
+                textSize = 24f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(C_RED)
             })
-            body.addView(tc, lp(-1, -2, dp(10)))
+            addView(TextView(context).apply {
+                text = "Your access has been restricted by the admin."
+                textSize = 15f
+                setPadding(0, 16, 0, 0)
+                gravity = Gravity.CENTER
+            })
         }
-        scroll.addView(body); page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f)); wrapWithBottomBar(page)
+        setContentView(v)
     }
 
-    private fun showPaymentDialog(p: Payment?) {
-        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(12), dp(20), dp(8)) }
-        val amt = EditText(this).apply { hint = "Amount (₹)"; setText(if (p != null) p.amount.toString() else ""); inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL }
-        val note = EditText(this).apply { hint = "Note (Seth ne diya / Cash / Online)"; setText(p?.note ?: "Seth Payment") }
-        val date = EditText(this).apply { hint = "Date & Time"; setText(p?.dateTime ?: SimpleDateFormat("dd MMM yyyy, EEE • hh:mm a", Locale.getDefault()).format(Date())) }
-        box.addView(amt, lp(-1, -2, dp(8))); box.addView(note, lp(-1, -2, dp(8))); box.addView(date)
-        AlertDialog.Builder(this).setTitle(if (p == null) "सेठ से पैसा मिला" else "Edit Payment").setView(box).setNegativeButton("Cancel", null)
-            .setPositiveButton("Save") { _, _ ->
-                val a = amt.text.toString().trim().toDoubleOrNull()
-                if (a == null || a <= 0) toast("Sahi amount bhariye")
-                else { db.savePayment(p?.id, a, note.text.toString().trim(), date.text.toString().trim(), p?.createdMs ?: System.currentTimeMillis()); showHisabDashboard(); toast("Payment Saved ✓") }
+    private fun showRegistration() {
+        val sc = ScrollView(this).apply { setBackgroundColor(C_BG) }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 64, 48, 48)
+        }
+        sc.addView(box)
+        box.setOnApplyWindowInsetsListener { v, ins -> applyInsets(v, ins) }
+
+        val langBtn = pillBtn("🌐 ${t("lang")}: ${langs.find { it.first == (prefs.getString("lang", "hi") ?: "hi") }?.second}", C_GREEN) {
+            pickLanguage { showRegistration() }
+        }
+        box.addView(langBtn)
+
+        box.addView(TextView(this).apply {
+            text = "ZFH Ledger"
+            textSize = 28f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(C_DARK)
+            setPadding(0, 32, 0, 8)
+        })
+        box.addView(TextView(this).apply {
+            text = "Enter your mobile number to start or recover your old data"
+            textSize = 13f
+            setTextColor(Color.DKGRAY)
+            setPadding(0, 0, 0, 24)
+        })
+
+        var dpB64 = prefs.getString("user_dp", "") ?: ""
+        val dpImg = ImageView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(160, 160).apply { gravity = Gravity.CENTER_HORIZONTAL }
+            setBackgroundColor(Color.LTGRAY)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            if (dpB64.isNotEmpty()) b64ToBmp(dpB64)?.let { setImageBitmap(it) }
+        }
+        box.addView(dpImg)
+        box.addView(pillBtn("📷 ${t("photo")}", Color.DKGRAY) {
+            pickPhoto { b64 -> dpB64 = b64; b64ToBmp(b64)?.let { dpImg.setImageBitmap(it) } }
+        })
+
+        val etName = inputBox("Full Name *", prefs.getString("user_name", "") ?: "")
+        val etPhone = inputBox("10-Digit Mobile Number *", prefs.getString("user_phone", "") ?: "", InputType.TYPE_CLASS_PHONE)
+        val etShop = inputBox("Shop / Karkhana Name (Optional)", prefs.getString("user_shop", "") ?: "")
+        box.addView(etName); box.addView(etPhone); box.addView(etShop)
+
+        box.addView(pillBtn(t("login"), C_DARK) {
+            val nm = etName.text.toString().trim()
+            val ph = etPhone.text.toString().trim()
+            val sh = etShop.text.toString().trim()
+            if (ph.length != 10 || !ph.all { it.isDigit() }) {
+                toast("Enter valid 10-digit mobile number"); return@pillBtn
+            }
+            if (nm.isEmpty()) {
+                toast("Enter your name"); return@pillBtn
+            }
+            prefs.edit().putString("user_name", nm).putString("user_phone", ph).putString("user_shop", sh).putString("user_dp", dpB64).apply()
+            toast("Checking cloud data...")
+            recoverFromCloud(ph) {
+                startAppFlow()
+            }
+        })
+        setContentView(sc)
+    }
+
+    private fun buildMainUI() {
+        rootLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(C_BG)
+        }
+        rootLayout.setOnApplyWindowInsetsListener { v, ins -> applyInsets(v, ins) }
+
+        val header = LinearLayout(this).apply {
+            setBackgroundColor(C_DARK)
+            setPadding(36, 28, 36, 28)
+            gravity = Gravity.CENTER_VERTICAL
+            addView(TextView(context).apply {
+                text = "ZFH Ledger"
+                textSize = 20f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.WHITE)
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            })
+            addView(TextView(context).apply {
+                text = "🌐"
+                textSize = 20f
+                setPadding(16, 8, 16, 8)
+                setOnClickListener { pickLanguage { buildMainUI() } }
+            })
+        }
+        rootLayout.addView(header)
+
+        contentFrame = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(-1, 0, 1f)
+        }
+        rootLayout.addView(contentFrame)
+
+        navBar = LinearLayout(this).apply {
+            setBackgroundColor(Color.WHITE)
+            elevation = 12f
+            setPadding(8, 14, 8, 14)
+        }
+        val tabs = listOf("🏠\n${t("home")}", "🔍\n${t("search")}", "➕\n${t("add")}", "💰\n${t("hisab")}", "⚙️\n${t("profile")}")
+        tabs.forEachIndexed { i, lbl ->
+            navBar.addView(TextView(this).apply {
+                text = lbl
+                textSize = 11f
+                gravity = Gravity.CENTER
+                setTextColor(if (i == currentTab) C_DARK else Color.GRAY)
+                if (i == currentTab) setTypeface(null, Typeface.BOLD)
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+                setOnClickListener {
+                    if (i != 2) pendingEditItemIdx = -1
+                    currentTab = i
+                    buildMainUI()
+                }
+            })
+        }
+        rootLayout.addView(navBar)
+        setContentView(rootLayout)
+        renderTab()
+    }
+
+    private fun renderTab() {
+        contentFrame.removeAllViews()
+        when (currentTab) {
+            0 -> renderHome(false)
+            1 -> renderHome(true)
+            2 -> renderAddEdit()
+            3 -> renderHisab()
+            4 -> renderProfile()
+        }
+    }
+
+    private fun renderHome(isSearch: Boolean) {
+        val sc = ScrollView(this)
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 24, 28, 24) }
+        sc.addView(list)
+
+        if (isSearch) {
+            val et = inputBox("Search model / serial / size / date...", searchQuery)
+            et.setOnEditorActionListener { _, _, _ -> searchQuery = et.text.toString().trim(); renderTab(); true }
+            list.addView(et)
+            list.addView(pillBtn("🔍 ${t("search")}", C_GREEN) { searchQuery = et.text.toString().trim(); renderTab() })
+        }
+
+        val arr = getArr("items")
+        var sum = 0
+        val matched = mutableListOf<Pair<Int, JSONObject>>()
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            val q = searchQuery.lowercase()
+            if (!isSearch || q.isEmpty() || o.optString("model").lowercase().contains(q) || o.optString("serial").lowercase().contains(q) || o.optString("size").lowercase().contains(q) || o.optString("date").lowercase().contains(q)) {
+                matched.add(i to o)
+                sum += o.optInt("amount", 0)
+            }
+        }
+
+        list.addView(cardBox(C_DARK).apply {
+            addView(TextView(context).apply {
+                text = "${t("items")}: ${matched.size}   |   ${t("bill")}: ₹$sum"
+                textSize = 15f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(C_GOLD)
+            })
+        })
+
+        for (pair in matched.reversed()) {
+            val idx = pair.first
+            val o = pair.second
+            val c = cardBox(Color.WHITE)
+            c.setOnClickListener { pendingEditItemIdx = idx; currentTab = 2; buildMainUI() }
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            val b64 = o.optString("photo")
+            if (b64.isNotEmpty()) {
+                row.addView(ImageView(this).apply {
+                    layoutParams = LinearLayout.LayoutParams(150, 150).apply { rightMargin = 24 }
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    b64ToBmp(b64)?.let { setImageBitmap(it) }
+                })
+            }
+            val m = o.optString("model").ifEmpty { "No Model" }
+            val sr = o.optString("serial")
+            val sz = o.optString("size").ifEmpty { "-" }
+            val amt = o.optInt("amount", 0)
+            val amtTxt = if (amt > 0) "₹$amt" else "Pending ✏️"
+            val srTxt = if (sr.isNotEmpty()) " | Sr: $sr" else ""
+            val info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; layoutParams = LinearLayout.LayoutParams(0, -2, 1f) }
+            info.addView(TextView(this).apply {
+                text = "#${idx + 1} • $m"
+                textSize = 16f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(C_DARK)
+            })
+            info.addView(TextView(this).apply {
+                text = "Size: $sz$srTxt | $amtTxt\n${o.optString("date")}"
+                textSize = 13f
+                setTextColor(if (amt > 0) Color.DKGRAY else C_RED)
+            })
+            row.addView(info)
+            row.addView(TextView(this).apply {
+                text = "✏️"
+                textSize = 18f
+                setPadding(16, 8, 16, 8)
+                setOnClickListener { pendingEditItemIdx = idx; currentTab = 2; buildMainUI() }
+            })
+            row.addView(TextView(this).apply {
+                text = "🗑️"
+                textSize = 18f
+                setPadding(12, 8, 8, 8)
+                setOnClickListener {
+                    confirmDel {
+                        val na = JSONArray()
+                        for (j in 0 until arr.length()) if (j != idx) na.put(arr.get(j))
+                        prefs.edit().putString("items", na.toString()).apply()
+                        syncToCloud()
+                        renderTab()
+                    }
+                }
+            })
+            c.addView(row)
+            list.addView(c)
+        }
+        contentFrame.addView(sc)
+    }
+
+    private fun renderAddEdit() {
+        val sc = ScrollView(this)
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(36, 28, 36, 28) }
+        sc.addView(box)
+
+        val arr = getArr("items")
+        val editObj = if (pendingEditItemIdx in 0 until arr.length()) arr.getJSONObject(pendingEditItemIdx) else null
+        tempPhotoB64 = editObj?.optString("photo") ?: ""
+
+        val img = ImageView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(-1, 360).apply { bottomMargin = 20 }
+            setBackgroundColor(Color.parseColor("#E0E0E0"))
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            if (tempPhotoB64.isNotEmpty()) b64ToBmp(tempPhotoB64)?.let { setImageBitmap(it) }
+        }
+        box.addView(img)
+        box.addView(pillBtn("📷 ${t("photo")}", Color.DKGRAY) {
+            pickPhoto { b64 -> tempPhotoB64 = b64; b64ToBmp(b64)?.let { img.setImageBitmap(it) } }
+        })
+
+        val etModel = inputBox("Model No. (Optional)", editObj?.optString("model") ?: "")
+        val etSerial = inputBox("Serial No. (Optional)", editObj?.optString("serial") ?: "")
+        val etSize = inputBox("Size (Optional, e.g. 6x4)", editObj?.optString("size") ?: "")
+        val oldAmt = editObj?.optInt("amount", 0) ?: 0
+        val etAmt = inputBox("Amount ₹ (Optional - fill later)", if (oldAmt > 0) oldAmt.toString() else "", InputType.TYPE_CLASS_NUMBER)
+        box.addView(etModel); box.addView(etSerial); box.addView(etSize); box.addView(etAmt)
+
+        fun saveItemNow(m: String, sr: String, s: String, a: Int) {
+            val nowMs = editObj?.optLong("ts") ?: System.currentTimeMillis()
+            val dt = editObj?.optString("date") ?: SimpleDateFormat("dd/MM/yyyy hh:mm a", Locale.getDefault()).format(Date(nowMs))
+            val obj = JSONObject().apply {
+                put("model", m); put("serial", sr); put("size", s); put("amount", a)
+                put("photo", tempPhotoB64); put("date", dt); put("ts", nowMs)
+            }
+            if (editObj != null) arr.put(pendingEditItemIdx, obj) else arr.put(obj)
+            prefs.edit().putString("items", arr.toString()).apply()
+            pendingEditItemIdx = -1
+            syncToCloud()
+            currentTab = 0
+            buildMainUI()
+        }
+
+        box.addView(pillBtn("💾 ${t("save")}", C_GREEN) {
+            val m = etModel.text.toString().trim()
+            val sr = etSerial.text.toString().trim()
+            val s = etSize.text.toString().trim()
+            val a = etAmt.text.toString().trim().toIntOrNull() ?: 0
+            if (m.isEmpty() && sr.isEmpty() && s.isEmpty() && a == 0 && tempPhotoB64.isEmpty()) {
+                toast("Add photo or at least one detail"); return@pillBtn
+            }
+            if (a == 0) {
+                AlertDialog.Builder(this)
+                    .setTitle("Amount नहीं डाला है!")
+                    .setMessage("आपने Amount नहीं लिखा है। बिना Amount के Save करें?")
+                    .setPositiveButton("Yes") { _, _ -> saveItemNow(m, sr, s, 0) }
+                    .setNegativeButton("No", null)
+                    .show()
+            } else {
+                saveItemNow(m, sr, s, a)
+            }
+        })
+        contentFrame.addView(sc)
+    }
+
+    private fun renderHisab() {
+        val sc = ScrollView(this)
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 24, 28, 24) }
+        sc.addView(box)
+
+        val filterRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        filterRow.addView(pillBtn(t("all_time"), if (hisabStartMs == 0L) C_DARK else Color.GRAY) {
+            hisabStartMs = 0L; hisabEndMs = Long.MAX_VALUE; renderTab()
+        }.apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = 12 } })
+        filterRow.addView(pillBtn("📅 ${t("date_range")}", if (hisabStartMs > 0L) C_DARK else Color.GRAY) {
+            pickDate { s -> pickDate { e -> hisabStartMs = s; hisabEndMs = e + 86399999L; renderTab() } }
+        }.apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f) })
+        box.addView(filterRow)
+
+        val items = getArr("items")
+        val pays = getArr("payments")
+        var itemCount = 0; var totalBill = 0; var totalMila = 0
+
+        for (i in 0 until items.length()) {
+            val o = items.getJSONObject(i)
+            val ts = o.optLong("ts", 0L)
+            if (ts in hisabStartMs..hisabEndMs) { itemCount++; totalBill += o.optInt("amount", 0) }
+        }
+        val payMatched = mutableListOf<Pair<Int, JSONObject>>()
+        for (i in 0 until pays.length()) {
+            val p = pays.getJSONObject(i)
+            val ts = p.optLong("ts", 0L)
+            if (ts in hisabStartMs..hisabEndMs) { totalMila += p.optInt("amount", 0); payMatched.add(i to p) }
+        }
+        val baki = totalBill - totalMila
+
+        box.addView(cardBox(C_DARK).apply {
+            addView(TextView(context).apply {
+                text = "${t("items")}: $itemCount\n${t("bill")}: ₹$totalBill\n${t("mila")}: ₹$totalMila"
+                textSize = 16f; setTextColor(Color.WHITE)
+            })
+            addView(TextView(context).apply {
+                text = "${t("baki")}: ₹$baki"
+                textSize = 22f; setTypeface(null, Typeface.BOLD); setTextColor(C_GOLD); setPadding(0, 12, 0, 0)
+            })
+        })
+
+        box.addView(pillBtn(t("add_pay"), C_GREEN) { showPayDialog(-1, null) })
+        box.addView(pillBtn("🔄 ${t("reset")}", C_RED) {
+            AlertDialog.Builder(this).setTitle("Reset Hisab?").setMessage("Clear all items & payments?")
+                .setPositiveButton("Yes") { _, _ ->
+                    prefs.edit().putString("items", "[]").putString("payments", "[]").apply()
+                    syncToCloud(); renderTab()
+                }.setNegativeButton("No", null).show()
+        })
+
+        for (pair in payMatched.reversed()) {
+            val idx = pair.first; val p = pair.second
+            box.addView(cardBox(Color.WHITE).apply {
+                val r = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                r.addView(TextView(context).apply {
+                    text = "💵 ₹${p.optInt("amount")}  •  ${p.optString("note")}\n${p.optString("date")}"
+                    textSize = 14f; layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+                })
+                r.addView(TextView(context).apply {
+                    text = "✏️"; textSize = 18f; setPadding(14, 8, 14, 8)
+                    setOnClickListener { showPayDialog(idx, p) }
+                })
+                r.addView(TextView(context).apply {
+                    text = "🗑️"; textSize = 18f; setPadding(10, 8, 8, 8)
+                    setOnClickListener {
+                        confirmDel {
+                            val np = JSONArray()
+                            for (j in 0 until pays.length()) if (j != idx) np.put(pays.get(j))
+                            prefs.edit().putString("payments", np.toString()).apply()
+                            syncToCloud(); renderTab()
+                        }
+                    }
+                })
+                addView(r)
+            })
+        }
+        contentFrame.addView(sc)
+    }
+
+    private fun showPayDialog(idx: Int, old: JSONObject?) {
+        val lay = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(36, 20, 36, 10) }
+        val etA = inputBox("Amount (₹)", if (old != null) old.optInt("amount").toString() else "", InputType.TYPE_CLASS_NUMBER)
+        val etN = inputBox("Note (e.g. Cash / UPI)", old?.optString("note") ?: "Cash")
+        lay.addView(etA); lay.addView(etN)
+        AlertDialog.Builder(this).setTitle(t("add_pay")).setView(lay)
+            .setPositiveButton(t("save")) { _, _ ->
+                val a = etA.text.toString().trim().toIntOrNull() ?: return@setPositiveButton
+                val n = etN.text.toString().trim()
+                val arr = getArr("payments")
+                val ts = old?.optLong("ts") ?: System.currentTimeMillis()
+                val dt = old?.optString("date") ?: SimpleDateFormat("dd/MM/yyyy", Locale.getDefault()).format(Date(ts))
+                val o = JSONObject().apply { put("amount", a); put("note", n); put("date", dt); put("ts", ts) }
+                if (idx >= 0) arr.put(idx, o) else arr.put(o)
+                prefs.edit().putString("payments", arr.toString()).apply()
+                syncToCloud(); renderTab()
+            }.setNegativeButton("Cancel", null).show()
+    }
+
+    private fun renderProfile() {
+        val sc = ScrollView(this)
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(32, 28, 32, 28) }
+        sc.addView(box)
+
+        val nm = prefs.getString("user_name", "") ?: ""
+        val ph = prefs.getString("user_phone", "") ?: ""
+        val sh = prefs.getString("user_shop", "") ?: ""
+        val dp = prefs.getString("user_dp", "") ?: ""
+
+        box.addView(cardBox(Color.WHITE).apply {
+            val r = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            r.addView(ImageView(context).apply {
+                layoutParams = LinearLayout.LayoutParams(130, 130).apply { rightMargin = 24 }
+                setBackgroundColor(Color.LTGRAY); scaleType = ImageView.ScaleType.CENTER_CROP
+                if (dp.isNotEmpty()) b64ToBmp(dp)?.let { setImageBitmap(it) }
+            })
+            r.addView(TextView(context).apply {
+                text = "$nm\n📞 $ph\n🏪 $sh"
+                textSize = 15f; setTypeface(null, Typeface.BOLD); layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            })
+            r.addView(TextView(context).apply {
+                text = "✏️"; textSize = 20f; setPadding(16, 8, 8, 8)
+                setOnClickListener { showRegistration() }
+            })
+            addView(r)
+        })
+
+        val curL = langs.find { it.first == (prefs.getString("lang", "hi") ?: "hi") }?.second ?: "हिंदी"
+        box.addView(pillBtn("🌐 ${t("lang")}: $curL", C_GREEN) { pickLanguage { buildMainUI() } })
+        val lk = prefs.getBoolean("lock_on", false)
+        box.addView(pillBtn("🔒 ${t("lock")}: ${if (lk) "ON" else "OFF"}", Color.DKGRAY) {
+            prefs.edit().putBoolean("lock_on", !lk).apply(); renderTab()
+        })
+        box.addView(pillBtn("📤 ${t("backup")}", C_DARK) { exportLauncher.launch("ZFH_Ledger_Backup.json") })
+        box.addView(pillBtn("📥 ${t("restore")}", C_DARK) { importLauncher.launch(arrayOf("application/json", "*/*")) })
+        box.addView(pillBtn("☁️ Sync Now", C_GREEN) { syncToCloud(); toast("Synced to Cloud!") })
+        box.addView(pillBtn("🚪 ${t("logout")}", C_RED) {
+            prefs.edit().remove("user_phone").apply()
+            showRegistration()
+        })
+        contentFrame.addView(sc)
+    }
+
+    private fun registerUserInCloud() {
+        val ph = prefs.getString("user_phone", "") ?: return
+        if (ph.length != 10) return
+        Thread {
+            try {
+                val u = JSONObject().apply {
+                    put("name", prefs.getString("user_name", ""))
+                    put("phone", ph)
+                    put("shop", prefs.getString("user_shop", ""))
+                    put("lang", prefs.getString("lang", "hi"))
+                    put("lastSeen", SimpleDateFormat("dd/MM/yyyy hh:mm a", Locale.getDefault()).format(Date()))
+                }
+                httpPut("$FB_URL/users/$ph.json", u.toString())
+            } catch (_: Exception) {}
+        }.start()
+    }
+
+    private fun syncToCloud() {
+        val ph = prefs.getString("user_phone", "") ?: return
+        if (ph.length != 10) return
+        Thread {
+            try {
+                val payload = JSONObject().apply {
+                    put("name", prefs.getString("user_name", ""))
+                    put("shop", prefs.getString("user_shop", ""))
+                    put("items", getArr("items"))
+                    put("payments", getArr("payments"))
+                }
+                httpPut("$FB_URL/data/$ph.json", payload.toString())
+            } catch (_: Exception) {}
+        }.start()
+    }
+
+    private fun recoverFromCloud(ph: String, done: () -> Unit) {
+        Thread {
+            try {
+                val res = URL("$FB_URL/data/$ph.json").readText().trim()
+                if (res != "null" && res.startsWith("{")) {
+                    val obj = JSONObject(res)
+                    val ed = prefs.edit()
+                    if (obj.has("items")) ed.putString("items", obj.getJSONArray("items").toString())
+                    if (obj.has("payments")) ed.putString("payments", obj.getJSONArray("payments").toString())
+                    if (obj.optString("name").isNotEmpty()) ed.putString("user_name", obj.getString("name"))
+                    if (obj.optString("shop").isNotEmpty()) ed.putString("user_shop", obj.getString("shop"))
+                    ed.apply()
+                    runOnUiThread { toast("Old Data Recovered!"); done() }
+                    return@Thread
+                }
+            } catch (_: Exception) {}
+            runOnUiThread { done() }
+        }.start()
+    }
+
+    private fun httpPut(urlStr: String, body: String) {
+        val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+            requestMethod = "PUT"
+            setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+            doOutput = true; connectTimeout = 8000; readTimeout = 8000
+        }
+        conn.outputStream.use { it.write(body.toByteArray()) }
+        conn.responseCode
+        conn.disconnect()
+    }
+
+    private fun pickLanguage(onDone: () -> Unit) {
+        val names = langs.map { it.second }.toTypedArray()
+        AlertDialog.Builder(this).setTitle("🌐 Select Language")
+            .setItems(names) { _, which ->
+                prefs.edit().putString("lang", langs[which].first).apply()
+                onDone()
             }.show()
     }
 
-    private fun recordCard(item: Furniture, serialNo: Int) = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; background = roundBg(0xFFFFFFFF.toInt(), 14, 0xFFE2EBE6.toInt()); elevation = dp(2).toFloat(); setPadding(dp(12), dp(12), dp(10), dp(12))
-        addView(ImageView(context).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP; background = roundBg(greenLight, 10); clipToOutline = true
-            val bmp = if (item.photo.isNotBlank() && File(item.photo).exists()) BitmapFactory.decodeFile(item.photo) else null
-            if (bmp != null) setImageBitmap(bmp) else setImageResource(android.R.drawable.ic_menu_gallery)
-        }, LinearLayout.LayoutParams(dp(74), dp(68)).apply { rightMargin = dp(12) })
-        val info = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        info.addView(TextView(context).apply { text = "#$serialNo  ${item.model}"; textSize = 16f; setTypeface(null, Typeface.BOLD); setTextColor(textDark) })
-        if (item.size.isNotBlank()) info.addView(TextView(context).apply { text = "Size: ${item.size}"; textSize = 13f; setTextColor(textMuted) })
-        info.addView(TextView(context).apply { text = "₹ ${money(item.amount)}"; textSize = 16f; setTypeface(null, Typeface.BOLD); setTextColor(greenBtn); setPadding(0, dp(2), 0, dp(2)) })
-        info.addView(TextView(context).apply { text = "📅 ${item.dateTime}"; textSize = 11f; setTextColor(textMuted) })
-        addView(info, LinearLayout.LayoutParams(0, -2, 1f))
-        addView(TextView(context).apply {
-            text = "⋮"; textSize = 22f; setTypeface(null, Typeface.BOLD); setTextColor(textMuted); setPadding(dp(10), dp(6), dp(6), dp(6))
-            setOnClickListener { v -> PopupMenu(context, v).apply { menu.add("Edit"); menu.add("Delete"); setOnMenuItemClickListener { m -> if (m.title == "Edit") showForm(item) else AlertDialog.Builder(context).setMessage("Delete '${item.model}'?").setNegativeButton("Cancel", null).setPositiveButton("Delete") { _, _ -> db.delete(item.id); openTab(currentTab) }.show(); true } }.show() }
-        })
+    private fun pickPhoto(cb: (String) -> Unit) {
+        pendingPhotoCb = cb
+        AlertDialog.Builder(this).setTitle(t("photo"))
+            .setItems(arrayOf("📷 Camera", "🖼️ Gallery")) { _, w ->
+                if (w == 0) camLauncher.launch(null) else galLauncher.launch("image/*")
+            }.show()
     }
 
-    private fun showForm(item: Furniture?) {
-        chosenPhoto = item?.photo ?: ""; root.removeAllViews()
-        val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
-        val scroll = ScrollView(this); val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(16), dp(16), dp(24)) }
-        val photoBox = FrameLayout(this).apply { background = roundBg(greenLight, 16, 0xFFCDE0D5.toInt()); clipToOutline = true }
-        val img = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            val bmp = if (chosenPhoto.isNotBlank() && File(chosenPhoto).exists()) BitmapFactory.decodeFile(chosenPhoto) else null
-            if (bmp != null) setImageBitmap(bmp) else setImageResource(android.R.drawable.ic_menu_camera)
-        }
-        previewImg = img; photoBox.addView(img, FrameLayout.LayoutParams(-1, dp(180)))
-        val camPill = TextView(this).apply {
-            text = if (chosenPhoto.isNotBlank()) "📷 Change Photo" else "📷 Choose Photo"; setTextColor(0xFFFFFFFF.toInt()); textSize = 14f; setTypeface(null, Typeface.BOLD)
-            background = roundBg(0xCC111111.toInt(), 20); setPadding(dp(16), dp(8), dp(16), dp(8))
-            setOnClickListener {
-                AlertDialog.Builder(this@MainActivity).setTitle("Select Furniture Photo")
-                    .setItems(arrayOf("📷 Camera (फोटो खींचें)", "🖼️ Gallery (गैलरी से चुनें)")) { _, w -> if (w == 0) takeCameraPhoto.launch(null) else pickPhoto.launch("image/*") }.show()
-            }
-        }
-        photoStatus = camPill; photoBox.addView(camPill, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(12) })
-        box.addView(photoBox, lp(-1, dp(180), dp(14)))
-        fun inp(icon: String, label: String, value: String, num: Boolean = false): EditText {
-            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; background = roundBg(0xFFFFFFFF.toInt(), 12, 0xFFD5E2DB.toInt()); setPadding(dp(14), dp(10), dp(14), dp(10)) }
-            row.addView(TextView(this).apply { text = icon; textSize = 20f; setPadding(0, 0, dp(12), 0) })
-            val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            col.addView(TextView(this).apply { text = label; textSize = 12f; setTextColor(greenDark); setTypeface(null, Typeface.BOLD) })
-            val e = EditText(this).apply { setText(value); setBackgroundColor(0); setPadding(0, dp(2), 0, 0); textSize = 16f; if (num) inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL }
-            col.addView(e); row.addView(col, LinearLayout.LayoutParams(0, -2, 1f)); box.addView(row, lp(-1, -2, dp(12))); return e
-        }
-        val size = inp("📐", "Size (e.g. 6x3 ft)", item?.size ?: "")
-        val model = inp("#️⃣", "Model No. (e.g. SF-101)", item?.model ?: "")
-        val amount = inp("₹", "Amount (₹)", if (item != null) item.amount.toString() else "", true)
-        val date = inp("📅", "Date & Time", item?.dateTime ?: SimpleDateFormat("dd MMM yyyy, EEE • hh:mm a", Locale.getDefault()).format(Date()))
-        val doSave = {
-            val a = amount.text.toString().trim().toDoubleOrNull()
-            if (model.text.isBlank() || a == null) toast("Model No. aur valid Amount bhariye")
-            else { db.save(item?.id, model.text.toString().trim(), size.text.toString().trim(), a, date.text.toString().trim(), chosenPhoto, item?.createdMs ?: System.currentTimeMillis()); openTab(0); toast("Record Saved ✓") }
-        }
-        box.addView(TextView(this).apply { text = "✓  Save Record"; textSize = 17f; setTypeface(null, Typeface.BOLD); setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER; background = roundBg(greenBtn, 26); setPadding(dp(16), dp(14), dp(16), dp(14)); setOnClickListener { doSave() } }, lp(-1, -2, dp(10)))
-        scroll.addView(box)
-        val bar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setBackgroundColor(greenDark); setPadding(dp(14), dp(14), dp(14), dp(14))
-            addView(TextView(context).apply { text = "←"; textSize = 22f; setTextColor(0xFFFFFFFF.toInt()); setPadding(dp(8), dp(4), dp(12), dp(4)); setOnClickListener { openTab(currentTab) } })
-            addView(TextView(context).apply { text = if (item == null) "Add Furniture" else "Edit Furniture"; textSize = 20f; setTypeface(null, Typeface.BOLD); setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER }, LinearLayout.LayoutParams(0, -2, 1f))
-            addView(TextView(context).apply { text = "💾"; textSize = 20f; setTextColor(0xFFFFFFFF.toInt()); setPadding(dp(12), dp(4), dp(8), dp(4)); setOnClickListener { doSave() } })
-        }
-        page.addView(bar); page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f)); root.addView(page)
+    private fun pickDate(cb: (Long) -> Unit) {
+        val c = Calendar.getInstance()
+        DatePickerDialog(this, { _, y, m, d ->
+            val cal = Calendar.getInstance().apply { set(y, m, d, 0, 0, 0); set(Calendar.MILLISECOND, 0) }
+            cb(cal.timeInMillis)
+        }, c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH)).show()
     }
 
-    private fun showBackup() {
-        root.removeAllViews()
-        val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
-        page.addView(LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setBackgroundColor(greenDark); setPadding(dp(14), dp(14), dp(14), dp(14))
-            addView(TextView(context).apply { text = "←"; textSize = 22f; setTextColor(0xFFFFFFFF.toInt()); setPadding(dp(8), dp(4), dp(12), dp(4)); setOnClickListener { openTab(currentTab) } })
-            addView(TextView(context).apply { text = "Backup & Restore"; textSize = 20f; setTypeface(null, Typeface.BOLD); setTextColor(0xFFFFFFFF.toInt()) })
-        })
-        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(18), dp(20), dp(18), dp(20)) }
-        body.addView(TextView(this).apply { text = "☁️"; textSize = 54f; gravity = Gravity.CENTER })
-        body.addView(TextView(this).apply { text = "Keep your data safe"; textSize = 16f; setTypeface(null, Typeface.BOLD); gravity = Gravity.CENTER; setTextColor(textDark) }, lp(-1, -2, dp(18)))
-        fun bCard(t: String, s: String, bg: Int, st: Int, fn: () -> Unit) {
-            val c = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = roundBg(bg, 14, st); setPadding(dp(16), dp(16), dp(16), dp(16)); setOnClickListener { fn() } }
-            c.addView(TextView(this).apply { text = t; textSize = 16f; setTypeface(null, Typeface.BOLD); setTextColor(textDark) })
-            c.addView(TextView(this).apply { text = s; textSize = 13f; setTextColor(textMuted) }); body.addView(c, lp(-1, -2, dp(12)))
-        }
-        bCard("✓ Automatic Backup (Android)", "Data is backed up automatically on device", greenLight, 0xFF81C784.toInt()) { toast("Auto Backup On ✓") }
-        bCard("💾 Manual Backup (Save File)", "Save all furniture, photos & hisab transactions", 0xFFE3F2FD.toInt(), 0xFF90CAF9.toInt()) { exportBackup.launch("ZFH_Ledger_Backup.json") }
-        bCard("📂 Restore Data", "Restore from your backup JSON file", 0xFFFFFFFF.toInt(), 0xFFD0DDD6.toInt()) { importBackup.launch(arrayOf("application/json", "text/*")) }
-        page.addView(body); root.addView(page)
+    private fun confirmDel(yes: () -> Unit) {
+        AlertDialog.Builder(this).setTitle("Delete?").setPositiveButton("Yes") { _, _ -> yes() }.setNegativeButton("No", null).show()
     }
 
-    private fun showSettings() {
-        val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bgColor) }
-        page.addView(topBar("Profile & Settings"))
-        val scroll = ScrollView(this); val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(16), dp(16), dp(20)) }
-        val pCard = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; background = roundBg(0xFFFFFFFF.toInt(), 16, 0xFFDCE7E1.toInt()); elevation = dp(3).toFloat(); setPadding(dp(14), dp(14), dp(14), dp(14)) }
-        val dpPath = prefs().getString("reg_dp", "") ?: ""
-        pCard.addView(ImageView(this).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP; background = roundBg(greenLight, 32, greenBtn); clipToOutline = true
-            val bmp = if (dpPath.isNotBlank() && File(dpPath).exists()) BitmapFactory.decodeFile(dpPath) else null
-            if (bmp != null) setImageBitmap(bmp) else setImageResource(android.R.drawable.ic_menu_myplaces)
-        }, LinearLayout.LayoutParams(dp(64), dp(64)).apply { rightMargin = dp(12) })
-        val pInfo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        pInfo.addView(TextView(this).apply { text = prefs().getString("reg_name", "ZFH User") ?: "ZFH User"; textSize = 18f; setTypeface(null, Typeface.BOLD); setTextColor(textDark) })
-        pInfo.addView(TextView(this).apply { text = "📞 ${prefs().getString("reg_phone", "") ?: ""}"; textSize = 14f; setTextColor(greenBtn) })
-        val shop = prefs().getString("reg_shop", "") ?: ""
-        if (shop.isNotBlank()) pInfo.addView(TextView(this).apply { text = "🏪 $shop"; textSize = 13f; setTextColor(textMuted) })
-        pCard.addView(pInfo, LinearLayout.LayoutParams(0, -2, 1f))
-        pCard.addView(TextView(this).apply { text = "✏️"; textSize = 20f; setPadding(dp(10), dp(8), dp(6), dp(8)); setOnClickListener { showRegister(true) } })
-        body.addView(pCard, lp(-1, -2, dp(14)))
+    private fun getArr(k: String): JSONArray = try { JSONArray(prefs.getString(k, "[]")) } catch (_: Exception) { JSONArray() }
 
-        fun row(t: String, rTxt: String, fn: () -> Unit) {
-            val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; background = roundBg(0xFFFFFFFF.toInt(), 12, 0xFFE0EAE4.toInt()); setPadding(dp(16), dp(16), dp(16), dp(16)); setOnClickListener { fn() } }
-            r.addView(TextView(this).apply { text = t; textSize = 16f; setTextColor(textDark) }, LinearLayout.LayoutParams(0, -2, 1f))
-            r.addView(TextView(this).apply { text = rTxt; textSize = 14f; setTextColor(greenBtn) }); body.addView(r, lp(-1, -2, dp(10)))
-        }
-        row("🔒 Fingerprint / Screen Lock", if (isLockEnabled()) "ON >" else "OFF >") { prefs().edit().putBoolean("screen_lock", !isLockEnabled()).apply(); toast(if (isLockEnabled()) "App Lock ON ✓" else "App Lock OFF"); showSettings() }
-        row("🔄 नया हिसाब चालू करें", "Reset >") { startNewHisab() }
-        row("☁️ Backup Settings", "Auto Backup On >") { showBackup() }
-        row("📂 Restore Data", ">") { importBackup.launch(arrayOf("application/json", "text/*")) }
-        row("ℹ️ About App", "ZFH Ledger v2.6 >") { toast("ZFH Ledger v2.6 - Zubair Edition") }
-        row("🔗 Share App", ">") { startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, "ZFH Ledger App!") }, "Share ZFH Ledger")) }
-        scroll.addView(body); page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f)); wrapWithBottomBar(page)
+    private fun bmpToB64(bmp: Bitmap): String {
+        val sc = Bitmap.createScaledBitmap(bmp, 360, (bmp.height * 360f / bmp.width).toInt().coerceAtLeast(1), true)
+        val out = ByteArrayOutputStream()
+        sc.compress(Bitmap.CompressFormat.JPEG, 55, out)
+        return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
     }
 
-    private fun makeBackup(): JSONObject {
-        val arr = JSONArray()
-        db.all().forEach { f ->
-            val o = JSONObject().put("id", f.id).put("model", f.model).put("size", f.size).put("amount", f.amount).put("dateTime", f.dateTime).put("createdMs", f.createdMs)
-            if (f.photo.isNotBlank() && File(f.photo).exists()) o.put("photoName", File(f.photo).name).put("photoBase64", Base64.encodeToString(File(f.photo).readBytes(), Base64.NO_WRAP))
-            arr.put(o)
-        }
-        val pArr = JSONArray()
-        db.allPayments().forEach { p -> pArr.put(JSONObject().put("id", p.id).put("amount", p.amount).put("note", p.note).put("dateTime", p.dateTime).put("createdMs", p.createdMs)) }
-        return JSONObject().put("app", "ZFH Ledger").put("version", 6).put("items", arr).put("payments", pArr)
+    private fun b64ToBmp(b64: String): Bitmap? = try {
+        val b = Base64.decode(b64, Base64.DEFAULT)
+        BitmapFactory.decodeByteArray(b, 0, b.size)
+    } catch (_: Exception) { null }
+
+    private fun pillBtn(txt: String, col: Int, click: () -> Unit) = Button(this).apply {
+        text = txt; setTextColor(Color.WHITE); isAllCaps = false; textSize = 14f
+        background = GradientDrawable().apply { setColor(col); cornerRadius = 40f }
+        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 16 }
+        setOnClickListener { click() }
     }
-    private fun restoreBackup(data: JSONObject) {
-        val arr = data.getJSONArray("items"); db.clearAll()
-        for (i in 0 until arr.length()) {
-            val o = arr.getJSONObject(i); var photo = ""
-            if (o.has("photoBase64")) {
-                val f = File(filesDir, o.optString("photoName", "restored_$i.jpg").replace(Regex("[^A-Za-z0-9._-]"), "_"))
-                f.writeBytes(Base64.decode(o.getString("photoBase64"), Base64.DEFAULT)); photo = f.absolutePath
-            }
-            db.save(null, o.optString("model"), o.optString("size"), o.optDouble("amount"), o.optString("dateTime"), photo, o.optLong("createdMs", System.currentTimeMillis()))
-        }
-        if (data.has("payments")) {
-            val pArr = data.getJSONArray("payments")
-            for (i in 0 until pArr.length()) { val o = pArr.getJSONObject(i); db.savePayment(null, o.optDouble("amount"), o.optString("note"), o.optString("dateTime"), o.optLong("createdMs", System.currentTimeMillis())) }
-        }
+
+    private fun cardBox(col: Int) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL; setPadding(28, 24, 28, 24)
+        background = GradientDrawable().apply { setColor(col); cornerRadius = 28f }
+        elevation = 4f
+        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 18 }
     }
-    private fun money(v: Double) = String.format(Locale("en", "IN"), "%,.0f", v)
-    private fun lp(w: Int, h: Int, bottom: Int = 0) = LinearLayout.LayoutParams(w, h).apply { if (bottom > 0) bottomMargin = bottom }
-    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+
+    private fun inputBox(h: String, v: String, type: Int = InputType.TYPE_CLASS_TEXT) = EditText(this).apply {
+        hint = h; setText(v); inputType = type; setPadding(28, 24, 28, 24)
+        background = GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = 24f; setStroke(2, Color.LTGRAY) }
+        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 16 }
+    }
+
+    private fun applyInsets(v: View, ins: WindowInsets): WindowInsets {
+        if (Build.VERSION.SDK_INT >= 30) {
+            val b = ins.getInsets(WindowInsets.Type.systemBars())
+            v.setPadding(b.left, b.top, b.right, b.bottom)
+        } else {
+            @Suppress("DEPRECATION")
+            v.setPadding(ins.systemWindowInsetLeft, ins.systemWindowInsetTop, ins.systemWindowInsetRight, ins.systemWindowInsetBottom)
+        }
+        return ins
+    }
+
+    private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_SHORT).show()
 }
